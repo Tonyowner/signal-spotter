@@ -52,14 +52,17 @@ host. The model never leaves your phone; the host only delivers the files.
 Tips:
 - Hold the phone upright with the light in the upper half of the screen. That area gets the extra
   long-range scan.
-- **Lenses:** on iPhones with more than one rear lens, buttons above the banner switch between
-  **0.5×** (ultra wide), **1×** and **Tele** (telephoto). Tele works best for lights far down the
-  road. The app remembers your choice. When iOS allows web pages to zoom the camera (iOS 17+),
-  a zoom slider appears under the lens buttons.
+- **Lenses & zoom:** buttons above the banner switch between **1×** and **Tele**, plus **0.5×**
+  when iOS exposes the ultra-wide lens. Tele uses the telephoto lens if iOS lists it. Otherwise it
+  zooms the main camera 3× (digitally, unless the browser offers hardware zoom). The detector then
+  sees the zoomed view, so distant lights get easier to find. The slider sets any zoom from 1× to
+  5×. The app remembers your choice.
 - **Volume:** tap 🔊 to open the volume panel. It has a slider, **Test sound** and **Mute**. The
   slider controls both the tones and the voice. The phone's volume buttons set the overall level
-  as usual.
-- Speech and tones also play with the silent switch on (iOS 17+).
+  as usual (alerts use the *media* volume).
+- Alerts play as a media clip, so they are audible even with the ring/silent switch on.
+- **Settings › Diagnostics** shows which cameras iOS reports and the audio status. This helps if
+  something doesn't work.
 - The screen stays awake while the app runs.
 - ⚙︎ Settings: voice, tones, repeat every 5 s, long-range mode, sensitivity, diagnostics overlay.
 - **Test with a photo or video** on the start screen runs the same detector on a file from your

@@ -34,7 +34,7 @@
     btnVolume: $('btnVolume'), volPanel: $('volPanel'), optVolume: $('optVolume'), volVal: $('volVal'),
     btnTestSound: $('btnTestSound'), btnMuteToggle: $('btnMuteToggle'),
     lensBar: $('lensBar'), lensButtons: $('lensButtons'), zoomRow: $('zoomRow'),
-    optCamZoom: $('optCamZoom'), camZoomVal: $('camZoomVal'),
+    optCamZoom: $('optCamZoom'), camZoomVal: $('camZoomVal'), diag: $('diag'),
   };
 
   // ---------- Settings ----------
@@ -69,7 +69,7 @@
     els.optVolume.addEventListener('input', () => {
       settings.volume = +els.optVolume.value;
       if (settings.volume > 0) settings.muted = false;
-      saveSettings(); applyVolume(); updateVolumeUI();
+      saveSettings(); updateVolumeUI();
     });
     els.optVolume.addEventListener('change', () => playAlertSound('green'));  // preview on release
     updateVolumeUI();
@@ -248,41 +248,105 @@
   }
 
   // ---------- Announcements ----------
-  // All alert audio runs through one Web Audio gain node so the volume slider controls both the
-  // beeps and the voice. The voice is pre-recorded (audio/*.wav) because iOS ignores the volume
-  // of speechSynthesis; speechSynthesis is only a fallback if the clips cannot be loaded.
-  let audioCtx = null, master = null;
-  const voiceData = {}, voiceBuffers = {};
-  const voiceLoaded = Promise.all(['red', 'yellow', 'green'].map((c) =>
-    fetch(`audio/${c}.wav`).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => { voiceData[c] = b; }).catch(() => {})));
+  // iOS mutes Web Audio when the ring/silent switch is on, and ignores the volume of both
+  // speechSynthesis and <audio>. So each alert (tones + recorded voice) is rendered here at the
+  // chosen volume into a small WAV and played through one <audio> element, which iOS treats as
+  // media playback (audible with the silent switch on). The element is unlocked by the Start tap.
+  const SR = 24000;
+  const alertAudio = new Audio();
+  alertAudio.preload = 'auto';
+  let alertUrl = null;
+  let audioStatus = 'not started';
+  const voicePcm = {};                      // color → Float32Array at SR
+  ['red', 'yellow', 'green'].forEach((c) => {
+    fetch(`audio/${c}.wav`).then((r) => (r.ok ? r.arrayBuffer() : null))
+      .then((b) => { if (b) voicePcm[c] = parseWav(b); }).catch(() => {});
+  });
 
   /** Slider position (0–100) → linear gain, on a curve that sounds even across the range. */
   const volumeGain = () => (settings.muted ? 0 : (settings.volume / 100) ** 2);
 
-  function applyVolume() {
-    if (!master) return;
-    master.gain.cancelScheduledValues(0);
-    master.gain.value = volumeGain();
+  function parseWav(buf) {
+    const v = new DataView(buf);
+    let off = 12, rate = SR, bits = 16, chans = 1;
+    while (off + 8 <= v.byteLength) {
+      const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3));
+      const size = v.getUint32(off + 4, true);
+      if (id === 'fmt ') { chans = v.getUint16(off + 10, true); rate = v.getUint32(off + 12, true); bits = v.getUint16(off + 22, true); }
+      if (id === 'data') {
+        if (bits !== 16) return null;
+        const n = Math.floor(size / 2 / chans), src = new Float32Array(n);
+        for (let i = 0; i < n; i++) src[i] = v.getInt16(off + 8 + i * 2 * chans, true) / 32768;
+        if (rate === SR) return src;
+        const out = new Float32Array(Math.round(n * SR / rate));   // linear resample
+        for (let i = 0; i < out.length; i++) {
+          const p = i * rate / SR, j = Math.floor(p), f = p - j;
+          out[i] = (src[j] || 0) * (1 - f) + (src[j + 1] || 0) * f;
+        }
+        return out;
+      }
+      off += 8 + size + (size & 1);
+    }
+    return null;
   }
 
-  function unlockAudio() {
-    // iOS: route web audio as media playback so it is audible even with the silent switch on.
-    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
-    try {
-      if (!audioCtx) {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        master = audioCtx.createGain();
-        master.gain.value = volumeGain();
-        master.connect(audioCtx.destination);
+  function encodeWav(pcm) {
+    const buf = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(buf);
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + pcm.length * 2, true); str(8, 'WAVE');
+    str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, SR, true); v.setUint32(28, SR * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, 'data'); v.setUint32(40, pcm.length * 2, true);
+    for (let i = 0; i < pcm.length; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 32767, true);
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+
+  const BEEPS = {
+    red: [[392, 0, 0.18], [392, 0.26, 0.18]],                       // two low tones
+    yellow: [[587, 0, 0.12], [587, 0.18, 0.12], [587, 0.36, 0.12]], // three medium tones
+    green: [[659, 0, 0.12], [880, 0.14, 0.22]],                     // rising chime
+  };
+
+  /** Renders tones and/or voice for a color at the given gain; returns PCM or null. */
+  function renderAlert(color, gain) {
+    const lead = 0.08;                       // iOS can clip the very start of a clip
+    const beepLen = settings.beep ? Math.max(...BEEPS[color].map(([, at, dur]) => at + dur)) + 0.12 : 0;
+    const voice = settings.voice ? voicePcm[color] : null;
+    if (!settings.beep && !voice) return null;
+    const total = Math.ceil((lead + beepLen + 0.05) * SR) + (voice ? voice.length : 0);
+    const pcm = new Float32Array(total);
+    if (settings.beep) {
+      for (const [freq, at, dur] of BEEPS[color]) {
+        const start = Math.round((lead + at) * SR), n = Math.round(dur * SR);
+        const peak = color === 'red' ? 0.35 : 0.6;
+        for (let i = 0; i < n; i++) {
+          const t = i / SR;
+          const env = t < 0.01 ? t / 0.01 : Math.exp(-6.9 * (t - 0.01) / (dur - 0.01));  // 10 ms attack, decay to −60 dB
+          const ph = 2 * Math.PI * freq * t;
+          const wave = color === 'red' ? (Math.sin(ph) >= 0 ? 1 : -1) : Math.sin(ph);
+          pcm[start + i] += wave * env * peak;
+        }
       }
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-      g.gain.value = 0.0001; o.connect(g).connect(audioCtx.destination);
-      o.start(); o.stop(audioCtx.currentTime + 0.02);
-      voiceLoaded.then(decodeVoices);
-    } catch { /* no web audio */ }
+    }
+    if (voice) pcm.set(voice, Math.round((lead + beepLen) * SR));
+    for (let i = 0; i < pcm.length; i++) pcm[i] *= gain;
+    return pcm;
+  }
+
+  function playPcm(pcm) {
+    if (alertUrl) URL.revokeObjectURL(alertUrl);
+    alertUrl = URL.createObjectURL(encodeWav(pcm));
+    alertAudio.src = alertUrl;
+    return alertAudio.play();
+  }
+
+  /** Must run inside a tap: plays a short silent clip so later alerts may play without a tap. */
+  function unlockAudio() {
+    playPcm(new Float32Array(Math.round(SR * 0.05)))
+      .then(() => { audioStatus = 'ready (media playback)'; })
+      .catch((err) => { if (err.name !== 'AbortError') audioStatus = `blocked: ${err.name}`; });
     try {
-      if ('speechSynthesis' in window) {
+      if ('speechSynthesis' in window) {     // fallback path, unlocked too
         const u = new SpeechSynthesisUtterance(' ');
         u.volume = 0;
         speechSynthesis.speak(u);
@@ -290,61 +354,26 @@
     } catch { /* no speech */ }
   }
 
-  function decodeVoices() {
-    for (const [c, data] of Object.entries(voiceData)) {
-      if (!data || voiceBuffers[c]) continue;
-      // slice(): decodeAudioData detaches the buffer it is given
-      audioCtx.decodeAudioData(data.slice(0), (buf) => { voiceBuffers[c] = buf; }, () => {});
-    }
-  }
-
-  /** Schedules the beep pattern at audio time t0; returns its duration in seconds. */
-  function beep(color, t0) {
-    const patterns = {
-      red: [[392, 0, 0.18], [392, 0.26, 0.18]],                       // two low tones
-      yellow: [[587, 0, 0.12], [587, 0.18, 0.12], [587, 0.36, 0.12]], // three medium tones
-      green: [[659, 0, 0.12], [880, 0.14, 0.22]],                     // rising chime
-    };
-    let end = 0;
-    for (const [freq, at, dur] of patterns[color]) {
-      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-      o.type = color === 'red' ? 'square' : 'sine';
-      o.frequency.value = freq;
-      g.gain.setValueAtTime(0, t0 + at);
-      g.gain.linearRampToValueAtTime(color === 'red' ? 0.3 : 0.6, t0 + at + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.001, t0 + at + dur);
-      o.connect(g).connect(master);
-      o.start(t0 + at); o.stop(t0 + at + dur + 0.02);
-      end = Math.max(end, at + dur);
-    }
-    return end;
-  }
-
-  function speak(color, t0) {
-    const buf = voiceBuffers[color];
-    if (buf) {
-      const src = audioCtx.createBufferSource();
-      src.buffer = buf;
-      src.connect(master);
-      src.start(t0);
-      return;
-    }
-    if (!('speechSynthesis' in window)) return;
-    const delayMs = Math.max(0, (t0 - audioCtx.currentTime) * 1000);
-    setTimeout(() => {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(SPOKEN[color]);
-      u.rate = 1.05; u.volume = Math.min(1, volumeGain());
-      speechSynthesis.speak(u);
-    }, delayMs);
+  function speakFallback(color) {
+    if (!settings.voice || !('speechSynthesis' in window)) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(SPOKEN[color]);
+    u.rate = 1.05;
+    speechSynthesis.speak(u);
   }
 
   function playAlertSound(color) {
-    if (!audioCtx || volumeGain() === 0) return;
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    let t = audioCtx.currentTime + 0.02;
-    if (settings.beep) t += beep(color, t) + 0.12;
-    if (settings.voice) speak(color, t);
+    const gain = volumeGain();
+    if (gain === 0) return;
+    const pcm = renderAlert(color, gain);
+    if (!pcm) { speakFallback(color); return; }   // voice clip not loaded yet
+    playPcm(pcm)
+      .then(() => { audioStatus = 'ready (media playback)'; })
+      .catch((err) => {
+        if (err.name === 'AbortError') return;          // replaced by a newer alert
+        audioStatus = `blocked: ${err.name} (using speech fallback)`;
+        speakFallback(color);
+      });
   }
 
   function announce(color) {
@@ -408,10 +437,10 @@
     octx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  /** Mapping from source pixels to screen CSS pixels (object-fit cover or contain). */
-  function screenMap(vw, vh, fit) {
+  /** Mapping from source pixels to screen CSS pixels (object-fit cover/contain, then centred zoom z). */
+  function screenMap(vw, vh, fit, z = 1) {
     const W = window.innerWidth, H = window.innerHeight;
-    const s = fit === 'contain' ? Math.min(W / vw, H / vh) : Math.max(W / vw, H / vh);
+    const s = (fit === 'contain' ? Math.min(W / vw, H / vh) : Math.max(W / vw, H / vh)) * z;
     return { s, dx: (W - vw * s) / 2, dy: (H - vh * s) / 2 };
   }
 
@@ -426,10 +455,10 @@
     ctx.closePath();
   }
 
-  function draw(vw, vh, fit, tile) {
+  function draw(vw, vh, fit, tile, z) {
     const W = window.innerWidth, H = window.innerHeight;
     octx.clearRect(0, 0, W, H);
-    const m = screenMap(vw, vh, fit);
+    const m = screenMap(vw, vh, fit, z);
 
     if (settings.debug && tile) {
       octx.setLineDash([6, 6]); octx.lineWidth = 1.5; octx.strokeStyle = 'rgba(255,255,255,0.5)';
@@ -468,9 +497,10 @@
   let fpsAvg = 0, inferAvg = 0;
 
   function currentSource() {
-    if (sourceKind === 'image') return { el: els.photo, vw: els.photo.naturalWidth, vh: els.photo.naturalHeight, fit: 'contain' };
+    if (sourceKind === 'image') return { el: els.photo, vw: els.photo.naturalWidth, vh: els.photo.naturalHeight, fit: 'contain', zoom: 1 };
     const v = els.video;
-    return { el: v, vw: v.videoWidth, vh: v.videoHeight, fit: sourceKind === 'file' ? 'contain' : 'cover' };
+    const camera = sourceKind === 'camera';
+    return { el: v, vw: v.videoWidth, vh: v.videoHeight, fit: camera ? 'cover' : 'contain', zoom: camera ? digitalZoom : 1 };
   }
 
   async function loop() {
@@ -483,10 +513,14 @@
       }
       const t0 = performance.now();
       const thresh = minScore();
-      let dets = await detectRegion(src.el, 0, 0, src.vw, src.vh, thresh);
+      // With digital zoom, detect on the zoomed (centre) part of the frame only.
+      const z = src.zoom || 1;
+      const cw = src.vw / z, ch = src.vh / z, cx = (src.vw - cw) / 2, cy = (src.vh - ch) / 2;
+      let dets = await detectRegion(src.el, cx, cy, cw, ch, thresh);
       let tile = null;
       if (settings.zoom) {
-        tile = zoomTile(src.vw, src.vh);
+        const t = zoomTile(cw, ch);
+        tile = { sx: cx + t.sx, sy: cy + t.sy, sw: t.sw, sh: t.sh };
         dets = dets.concat(await detectRegion(src.el, tile.sx, tile.sy, tile.sw, tile.sh, thresh));
       }
       dets = nms(dets);
@@ -495,13 +529,13 @@
 
       if (dets.length) { shownDets = dets; shownAt = t1; }
       updateState(frameVote(dets), t1);
-      draw(src.vw, src.vh, src.fit, tile);
+      draw(src.vw, src.vh, src.fit, tile, z);
 
       const dt = t1 - last; last = t1;
       fpsAvg = fpsAvg ? fpsAvg * 0.9 + (1000 / dt) * 0.1 : 1000 / dt;
       inferAvg = inferAvg ? inferAvg * 0.9 + (t1 - t0) * 0.1 : t1 - t0;
       els.status.textContent = settings.debug
-        ? `${fpsAvg.toFixed(1)} fps · ${inferAvg.toFixed(0)} ms · ${tf.getBackend()}\n${src.vw}×${src.vh} · thr ${thresh.toFixed(2)} · ${dets.length} box`
+        ? `${fpsAvg.toFixed(1)} fps · ${inferAvg.toFixed(0)} ms · ${tf.getBackend()}\n${src.vw}×${src.vh} · thr ${thresh.toFixed(2)} · zoom ${z.toFixed(1)}× · ${dets.length} box`
         : (dets.length ? `${dets.length} light${dets.length > 1 ? 's' : ''} in view` : 'Scanning…');
 
       await nextFrame();
@@ -509,16 +543,21 @@
   }
   const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
-  // ---------- Camera & lenses ----------
-  // iOS lists every rear lens as its own camera ("Back Camera", "Back Telephoto Camera",
-  // "Back Ultra Wide Camera"); labels become readable once camera permission is granted.
-  const LENS_LABEL = { ultra: '0.5×', wide: '1×', tele: 'Tele' };
+  // ---------- Camera, lenses & zoom ----------
+  // Some iOS versions list each rear lens as its own camera ("Back Telephoto Camera", …), others
+  // expose a single "Back Camera". Tele therefore uses the telephoto lens when it is listed and
+  // otherwise zooms the main camera — with hardware zoom if the browser offers it, else a digital
+  // crop. The crop is also what the detector sees, so distant lights become larger for it too.
+  const TELE_ZOOM = 3, DIGITAL_MAX = 5, HW_MAX = 10;
   const LENS_NAME = { ultra: 'Ultra wide', wide: 'Wide', tele: 'Telephoto' };
   let lenses = {};            // kind → deviceId, rear lenses only
-  let activeLens = null;
+  let cameraList = [];        // all video inputs, for diagnostics
+  let activeLens = 'wide';
+  let hwZoom = null;          // {min, max} when the track supports the zoom constraint
+  let digitalZoom = 1;
 
   function lensKind(label) {
-    const l = label.toLowerCase();
+    const l = (label || '').toLowerCase();
     if (/front|facetime|avant|vorder|frontal|anterior/.test(l)) return 'front';
     if (/ultra/.test(l)) return 'ultra';
     if (/tele/.test(l)) return 'tele';
@@ -528,9 +567,10 @@
 
   async function findLenses() {
     const found = {};
-    const devices = await navigator.mediaDevices.enumerateDevices();
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    cameraList = devices.map((d) => d.label || '(label hidden)');
     for (const d of devices) {
-      if (d.kind !== 'videoinput' || !d.label) continue;
+      if (!d.label) continue;
       const k = lensKind(d.label);
       if (k !== 'front' && k !== 'virtual' && !found[k]) found[k] = d.deviceId;
     }
@@ -544,14 +584,18 @@
     return navigator.mediaDevices.getUserMedia({ audio: false, video });
   }
 
-  async function startCamera(kind = settings.lens) {
+  /** Physical camera a mode needs: Tele falls back to zooming the main camera. */
+  const deviceFor = (mode) => (mode === 'tele' && !lenses.tele ? 'wide' : mode);
+
+  async function startCamera(mode = settings.lens) {
     stopSource();
     sourceKind = 'camera';
     els.photo.hidden = true; els.video.hidden = false;
     els.stage.classList.remove('contain');
 
+    const want = deviceFor(mode);
     if (!Object.keys(lenses).length) lenses = await findLenses().catch(() => ({}));
-    const id = lenses[kind] || null;
+    const id = lenses[deviceFor(mode)] || null;
     try {
       stream = await openStream(id);
     } catch (err) {
@@ -561,64 +605,105 @@
     if (!Object.keys(lenses).length) {
       // First run: permission was just granted, so the lens list is readable now.
       lenses = await findLenses().catch(() => ({}));
-      const opened = lensKind(stream.getVideoTracks()[0].label);
-      if (lenses[kind] && opened !== kind) {
+      const target = deviceFor(mode);
+      if (lenses[target] && lensKind(stream.getVideoTracks()[0].label) !== target) {
         stream.getTracks().forEach((t) => t.stop());
-        stream = await openStream(lenses[kind]);
+        stream = await openStream(lenses[target]);
       }
     }
-    activeLens = lensKind(stream.getVideoTracks()[0].label);
+    const opened = lensKind(stream.getVideoTracks()[0].label);
+    activeLens = opened === 'tele' || opened === 'ultra' ? opened : 'wide';
+    if (activeLens !== want && want !== 'wide') settings.lens = activeLens;   // requested lens not available
     els.video.srcObject = stream;
     await els.video.play();
+    setupZoom();
     renderLensBar();
   }
 
-  async function switchLens(kind) {
-    if (sourceKind !== 'camera' || kind === activeLens) return;
-    settings.lens = kind; settings.camZoom = 1; saveSettings();
+  async function selectMode(mode) {
+    if (sourceKind !== 'camera') return;
+    settings.lens = mode;
+    settings.camZoom = mode === 'tele' && !lenses.tele ? TELE_ZOOM : 1;
+    saveSettings();
     history.length = 0;
-    try { await startCamera(kind); } catch (err) { els.status.textContent = cameraErrorText(err); }
+    const target = deviceFor(mode);
+    if (lenses[target] && target !== activeLens) {
+      try { await startCamera(mode); } catch (err) { els.status.textContent = cameraErrorText(err); }
+    } else {
+      setupZoom();
+      renderLensBar();
+    }
+  }
+
+  function currentMode() {
+    if (activeLens !== 'wide') return activeLens;
+    return !lenses.tele && settings.camZoom >= 2 ? 'tele' : 'wide';
   }
 
   function renderLensBar() {
-    const kinds = ['ultra', 'wide', 'tele'].filter((k) => lenses[k]);
+    const modes = ['ultra', 'wide', 'tele'].filter((k) => k !== 'ultra' || lenses.ultra);
+    const label = { ultra: '0.5×', wide: '1×', tele: 'Tele' };
+    const cur = currentMode();
     els.lensButtons.textContent = '';
-    for (const k of kinds) {
+    for (const k of modes) {
       const b = document.createElement('button');
-      b.textContent = LENS_LABEL[k];
+      b.textContent = label[k];
       b.setAttribute('role', 'radio');
-      b.setAttribute('aria-label', `${LENS_NAME[k]} lens`);
-      b.setAttribute('aria-checked', String(k === activeLens));
-      b.addEventListener('click', () => switchLens(k));
+      b.setAttribute('aria-label', k === 'tele' && !lenses.tele ? `Telephoto (${TELE_ZOOM}× zoom)` : `${LENS_NAME[k]} lens`);
+      b.setAttribute('aria-checked', String(k === cur));
+      b.addEventListener('click', () => selectMode(k));
       els.lensButtons.appendChild(b);
     }
-    els.lensButtons.hidden = kinds.length < 2;
-    setupZoom();
-    els.lensBar.hidden = els.lensButtons.hidden && els.zoomRow.hidden;
+    els.lensButtons.hidden = false;
+    els.zoomRow.hidden = false;
+    els.lensBar.hidden = false;
   }
 
-  /** Shows a zoom slider when the browser exposes the camera's zoom (iOS 17+ Safari). */
+  /** Zoom slider: hardware zoom when the camera track supports it, otherwise digital. */
   function setupZoom() {
     const track = stream && stream.getVideoTracks()[0];
     const z = track && track.getCapabilities ? track.getCapabilities().zoom : null;
-    if (!z || !(z.max > z.min)) { els.zoomRow.hidden = true; return; }
-    const max = Math.min(z.max, 10);            // beyond ~10× digital zoom the image is too soft to help
-    els.optCamZoom.min = z.min;
+    hwZoom = z && z.max > z.min ? { min: z.min, max: Math.min(z.max, HW_MAX) } : null;
+    const min = hwZoom ? hwZoom.min : 1, max = hwZoom ? hwZoom.max : DIGITAL_MAX;
+    els.optCamZoom.min = min;
     els.optCamZoom.max = max;
-    els.optCamZoom.step = z.step > 0 ? Math.max(z.step, 0.1) : 0.1;
-    els.optCamZoom.value = Math.min(max, Math.max(z.min, settings.camZoom));
-    applyZoom(+els.optCamZoom.value);
-    els.zoomRow.hidden = false;
+    els.optCamZoom.step = 0.1;
+    const v = Math.min(max, Math.max(min, settings.camZoom));
+    els.optCamZoom.value = v;
+    applyZoom(v);
   }
 
   function applyZoom(v) {
     els.camZoomVal.textContent = `${v.toFixed(1)}×`;
+    if (hwZoom) {
+      digitalZoom = 1;
+      const track = stream && stream.getVideoTracks()[0];
+      if (track) track.applyConstraints({ advanced: [{ zoom: v }] }).catch(() => {});
+    } else {
+      digitalZoom = v;
+    }
+    els.video.style.transform = digitalZoom > 1 ? `scale(${digitalZoom})` : '';
+  }
+
+  function diagnostics() {
     const track = stream && stream.getVideoTracks()[0];
-    if (track) track.applyConstraints({ advanced: [{ zoom: v }] }).catch(() => {});
+    const s = track && track.getSettings ? track.getSettings() : {};
+    return [
+      `Version 1.2 · ${tf.getBackend ? tf.getBackend() : '?'}`,
+      `Cameras: ${cameraList.length ? cameraList.join(', ') : 'none listed yet'}`,
+      `Rear lenses found: ${Object.keys(lenses).join(', ') || 'none'}`,
+      `Active: ${track ? track.label || '(no label)' : 'no camera'}${s.width ? ` · ${s.width}×${s.height}` : ''}`,
+      `Zoom: ${hwZoom ? `hardware ${hwZoom.min}–${hwZoom.max}×` : `digital (max ${DIGITAL_MAX}×)`} · now ${settings.camZoom}×`,
+      `Audio: ${audioStatus} · voice clips ${Object.keys(voicePcm).length}/3`,
+      `Volume ${settings.volume}%${settings.muted ? ' (muted)' : ''}`,
+      navigator.userAgent.replace(/^Mozilla\/5\.0 /, ''),
+    ].join('\n');
   }
 
   function stopSource() {
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    digitalZoom = 1;
+    els.video.style.transform = '';
     els.video.pause();
     els.video.srcObject = null;
     if (els.video.src) { URL.revokeObjectURL(els.video.src); els.video.removeAttribute('src'); }
@@ -692,7 +777,10 @@
     if (f) begin(() => startFile(f));
     els.fileInput.value = '';
   });
-  els.btnSettings.addEventListener('click', () => { els.settings.hidden = false; });
+  els.btnSettings.addEventListener('click', () => {
+    els.diag.textContent = diagnostics();
+    els.settings.hidden = false;
+  });
   els.btnCloseSettings.addEventListener('click', () => { els.settings.hidden = true; });
   els.settings.addEventListener('click', (e) => { if (e.target === els.settings) els.settings.hidden = true; });
   els.btnChangeSource.addEventListener('click', () => {
@@ -712,29 +800,34 @@
     els.btnVolume.setAttribute('aria-expanded', String(show));
   }
   els.btnVolume.addEventListener('click', () => { unlockAudio(); showVolumePanel(els.volPanel.hidden); });
+  // Any tap re-enables alert audio if iOS has not allowed it yet.
+  document.addEventListener('touchend', () => { if (!audioStatus.startsWith('ready')) unlockAudio(); });
   document.addEventListener('pointerdown', (e) => {
     if (!els.volPanel.hidden && !els.volPanel.contains(e.target) && !els.btnVolume.contains(e.target)) showVolumePanel(false);
   });
   els.btnMuteToggle.addEventListener('click', () => {
     settings.muted = !settings.muted;
     if (!settings.muted && settings.volume === 0) { settings.volume = 50; els.optVolume.value = 50; }
-    saveSettings(); applyVolume(); updateVolumeUI();
+    saveSettings(); updateVolumeUI();
     if (settings.muted && 'speechSynthesis' in window) speechSynthesis.cancel();
   });
   let testColor = 0;
   els.btnTestSound.addEventListener('click', () => {
-    unlockAudio();
     playAlertSound(['red', 'yellow', 'green'][testColor++ % 3]);
   });
   els.optCamZoom.addEventListener('input', () => {
     settings.camZoom = +els.optCamZoom.value; saveSettings();
     applyZoom(settings.camZoom);
+    const cur = currentMode();
+    els.lensButtons.querySelectorAll('button').forEach((b, i, all) => {
+      const k = all.length === 3 ? ['ultra', 'wide', 'tele'][i] : ['wide', 'tele'][i];
+      b.setAttribute('aria-checked', String(k === cur));
+    });
   });
 
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState !== 'visible' || !running) return;
     requestWakeLock();
-    if (audioCtx && audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
     if (sourceKind === 'camera') {
       const track = stream && stream.getVideoTracks()[0];
       if (!track || track.readyState === 'ended') {
@@ -756,7 +849,8 @@
       for (const d of dets) Object.assign(d, classifyColor(el, vw, vh, d));
       return { dets, vote: frameVote(dets) };
     },
-    audioState: () => ({ gain: master && master.gain.value, voices: Object.keys(voiceBuffers), ctx: audioCtx && audioCtx.state }),
+    audioState: () => ({ status: audioStatus, voices: Object.keys(voicePcm), src: alertAudio.src.slice(0, 30), paused: alertAudio.paused }),
+    diagnostics: () => diagnostics(),
   };
 
   // ---------- Offline support ----------

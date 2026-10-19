@@ -30,6 +30,7 @@ html, body {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
   object-fit: cover;
+  transform-origin: 50% 50%;
 }
 #photo { object-fit: contain; }
 #stage.contain #video { object-fit: contain; }
@@ -195,6 +196,13 @@ button.secondary, .file-btn { background: #2c2c2e; color: #fff; }
 .row small { display: block; color: var(--muted); font-size: 13px; margin-top: 3px; }
 .row input[type=checkbox] { width: 26px; height: 26px; accent-color: #30d158; flex: none; }
 .row input[type=range] { width: 100%; accent-color: #0a84ff; }
+.diag-box { margin-top: 14px; color: var(--muted); font-size: 14px; }
+.diag-box summary { padding: 6px 0; }
+#diag {
+  white-space: pre-wrap; word-break: break-word; margin: 6px 0 0;
+  font: 12px/1.45 ui-monospace, "SF Mono", Menlo, monospace; color: #d1d1d6;
+  -webkit-user-select: text; user-select: text;
+}
 .settings-actions { display: flex; gap: 10px; margin-top: 20px; }
 .settings-actions button { font-size: 16px; }
 

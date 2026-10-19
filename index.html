@@ -74,14 +74,14 @@
       </label>
       <p class="fine">Runs entirely on your phone — no internet needed after the first visit.<br>
         Assistive aid only. Always rely on your own judgment and traffic rules.<br>
-        Version 1.1</p>
+        Version 1.2</p>
     </div>
   </section>
 
   <!-- Settings -->
   <section id="settings" class="sheet" hidden>
     <div class="settings-inner">
-      <h2>Settings <small class="version">v1.1</small></h2>
+      <h2>Settings <small class="version">v1.2</small></h2>
       <label class="row"><span>Speak color</span><input type="checkbox" id="optVoice"></label>
       <label class="row"><span>Beep tones</span><input type="checkbox" id="optBeep"></label>
       <label class="row"><span>Repeat announcement every 5 s</span><input type="checkbox" id="optRepeat"></label>
@@ -89,6 +89,10 @@
       <label class="row col"><span>Sensitivity <b id="sensVal"></b><small>Higher finds more lights, but also more false alarms</small></span>
         <input type="range" id="optSens" min="1" max="10" step="1"></label>
       <label class="row"><span>Show diagnostics</span><input type="checkbox" id="optDebug"></label>
+      <details class="diag-box">
+        <summary>Diagnostics (cameras &amp; audio)</summary>
+        <pre id="diag"></pre>
+      </details>
       <div class="settings-actions">
         <button id="btnChangeSource" class="secondary">Back to start screen</button>
         <button id="btnCloseSettings" class="primary">Done</button>
