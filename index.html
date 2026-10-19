@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Signal Spotter</title>
+  <meta name="description" content="Offline traffic light detector that announces red, yellow or green.">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Signals">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <img id="photo" alt="" hidden>
+    <canvas id="overlay"></canvas>
+    <div id="edge" aria-hidden="true"></div>
+  </div>
+
+  <header id="topbar">
+    <div id="status">Loading…</div>
+    <div class="top-actions">
+      <button id="btnMute" class="icon-btn" aria-label="Mute announcements" title="Mute">🔊</button>
+      <button id="btnSettings" class="icon-btn" aria-label="Settings" title="Settings">⚙︎</button>
+    </div>
+  </header>
+
+  <div id="banner" class="none" role="status" aria-live="assertive">
+    <div id="bannerLamp"></div>
+    <div id="bannerText">Searching for traffic lights…</div>
+  </div>
+
+  <!-- Start screen: a tap is required on iOS before camera, speech and sound can be used -->
+  <section id="start" class="sheet">
+    <div class="start-inner">
+      <div class="logo" aria-hidden="true"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+      <h1>Signal Spotter</h1>
+      <p class="lead">Point your camera at a traffic light. The light is highlighted and its color is shown and spoken aloud.</p>
+      <div id="loadWrap"><div id="loadBar"></div></div>
+      <p id="loadText">Loading detection model…</p>
+      <button id="btnStart" class="primary">Start camera</button>
+      <label class="file-btn">Test with a photo or video
+        <input id="fileInput" type="file" accept="image/*,video/*">
+      </label>
+      <p class="fine">Runs entirely on your phone — no internet needed after the first visit.<br>
+        Assistive aid only. Always rely on your own judgment and traffic rules.</p>
+    </div>
+  </section>
+
+  <!-- Settings -->
+  <section id="settings" class="sheet" hidden>
+    <div class="settings-inner">
+      <h2>Settings</h2>
+      <label class="row"><span>Speak color</span><input type="checkbox" id="optVoice"></label>
+      <label class="row"><span>Beep tones</span><input type="checkbox" id="optBeep"></label>
+      <label class="row"><span>Repeat announcement every 5 s</span><input type="checkbox" id="optRepeat"></label>
+      <label class="row"><span>Long-range mode<small>Extra zoomed scan of the upper-center view</small></span><input type="checkbox" id="optZoom"></label>
+      <label class="row col"><span>Sensitivity <b id="sensVal"></b><small>Higher finds more lights, but also more false alarms</small></span>
+        <input type="range" id="optSens" min="1" max="10" step="1"></label>
+      <label class="row"><span>Show diagnostics</span><input type="checkbox" id="optDebug"></label>
+      <div class="settings-actions">
+        <button id="btnChangeSource" class="secondary">Back to start screen</button>
+        <button id="btnCloseSettings" class="primary">Done</button>
+      </div>
+    </div>
+  </section>
+
+  <script src="vendor/tf.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
