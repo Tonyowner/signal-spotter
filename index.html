@@ -26,10 +26,34 @@
   <header id="topbar">
     <div id="status">Loading…</div>
     <div class="top-actions">
-      <button id="btnMute" class="icon-btn" aria-label="Mute announcements" title="Mute">🔊</button>
+      <button id="btnVolume" class="icon-btn" aria-label="Alert volume" aria-expanded="false" title="Volume">🔊</button>
       <button id="btnSettings" class="icon-btn" aria-label="Settings" title="Settings">⚙︎</button>
     </div>
   </header>
+
+  <!-- Alert volume -->
+  <div id="volPanel" hidden>
+    <div class="vol-row">
+      <span aria-hidden="true">🔈</span>
+      <input type="range" id="optVolume" min="0" max="100" step="5" aria-label="Alert volume">
+      <span aria-hidden="true">🔊</span>
+      <b id="volVal"></b>
+    </div>
+    <div class="vol-actions">
+      <button id="btnTestSound" class="secondary">Test sound</button>
+      <button id="btnMuteToggle" class="secondary">Mute</button>
+    </div>
+    <p class="vol-hint">The phone's volume buttons also set the overall level.</p>
+  </div>
+
+  <!-- Camera lens switcher (shown when the phone exposes more than one rear lens) -->
+  <div id="lensBar" hidden>
+    <div id="lensButtons" role="radiogroup" aria-label="Camera lens"></div>
+    <div id="zoomRow" hidden>
+      <input type="range" id="optCamZoom" min="1" max="1" step="0.1" aria-label="Camera zoom">
+      <b id="camZoomVal"></b>
+    </div>
+  </div>
 
   <div id="banner" class="none" role="status" aria-live="assertive">
     <div id="bannerLamp"></div>
@@ -49,14 +73,15 @@
         <input id="fileInput" type="file" accept="image/*,video/*">
       </label>
       <p class="fine">Runs entirely on your phone — no internet needed after the first visit.<br>
-        Assistive aid only. Always rely on your own judgment and traffic rules.</p>
+        Assistive aid only. Always rely on your own judgment and traffic rules.<br>
+        Version 1.1</p>
     </div>
   </section>
 
   <!-- Settings -->
   <section id="settings" class="sheet" hidden>
     <div class="settings-inner">
-      <h2>Settings</h2>
+      <h2>Settings <small class="version">v1.1</small></h2>
       <label class="row"><span>Speak color</span><input type="checkbox" id="optVoice"></label>
       <label class="row"><span>Beep tones</span><input type="checkbox" id="optBeep"></label>
       <label class="row"><span>Repeat announcement every 5 s</span><input type="checkbox" id="optRepeat"></label>

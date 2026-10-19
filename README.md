@@ -15,7 +15,7 @@ connection.
 | Detect | **SSDLite MobileNet v2** (COCO-trained, TensorFlow.js on the phone's GPU through WebGL) scores every frame for the *traffic light* class. A second pass zooms 2× into the upper-centre of the view to catch distant lights (Long-range mode). |
 | Classify | Each box is cropped from the full-resolution frame. Bright, saturated pixels are scored by hue (red / amber / green). The lamp's position in the housing (top / middle / bottom, or left / right) breaks ties. |
 | Stabilise | A light must have the same color in 3 of the last 5 frames before it is announced. A change is announced at once, and the banner clears 1.5 s after the light leaves view. |
-| Announce | Full-color banner, glowing screen edge and an outlined box. Voice says "Red light" etc. (iOS on-device speech). Tones: red = two low beeps, yellow = three medium, green = rising chime. |
+| Announce | Full-color banner, glowing screen edge and an outlined box. A voice clip says "Red light", "Yellow light" or "Green light". Tones: red = two low beeps, yellow = three medium, green = rising chime. All audio goes through one volume control. |
 
 ## Files
 
@@ -25,6 +25,7 @@ sw.js, manifest.webmanifest        offline cache + "Add to Home Screen" support
 vendor/tf.min.js                   TensorFlow.js 4.22.0 (bundled, no CDN)
 models/ssdlite_mobilenet_v2/       detector weights (~18 MB, bundled)
 icons/                             app icons (regenerate: node tools/make-icons.js)
+audio/                             spoken alerts (regenerate on Windows: node tools/make-voice.js)
 tools/serve.js                     local test server
 ```
 
@@ -51,7 +52,14 @@ host. The model never leaves your phone; the host only delivers the files.
 Tips:
 - Hold the phone upright with the light in the upper half of the screen. That area gets the extra
   long-range scan.
-- Speech and tones also play with the silent switch on (iOS 17+). Use 🔊 to mute.
+- **Lenses:** on iPhones with more than one rear lens, buttons above the banner switch between
+  **0.5×** (ultra wide), **1×** and **Tele** (telephoto). Tele works best for lights far down the
+  road. The app remembers your choice. When iOS allows web pages to zoom the camera (iOS 17+),
+  a zoom slider appears under the lens buttons.
+- **Volume:** tap 🔊 to open the volume panel. It has a slider, **Test sound** and **Mute**. The
+  slider controls both the tones and the voice. The phone's volume buttons set the overall level
+  as usual.
+- Speech and tones also play with the silent switch on (iOS 17+).
 - The screen stays awake while the app runs.
 - ⚙︎ Settings: voice, tones, repeat every 5 s, long-range mode, sensitivity, diagnostics overlay.
 - **Test with a photo or video** on the start screen runs the same detector on a file from your

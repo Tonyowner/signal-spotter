@@ -28,13 +28,21 @@
     start: $('start'), btnStart: $('btnStart'), fileInput: $('fileInput'),
     loadBar: $('loadBar'), loadText: $('loadText'),
     settings: $('settings'), btnSettings: $('btnSettings'), btnCloseSettings: $('btnCloseSettings'),
-    btnChangeSource: $('btnChangeSource'), btnMute: $('btnMute'),
+    btnChangeSource: $('btnChangeSource'),
     optVoice: $('optVoice'), optBeep: $('optBeep'), optRepeat: $('optRepeat'), optZoom: $('optZoom'),
     optSens: $('optSens'), sensVal: $('sensVal'), optDebug: $('optDebug'),
+    btnVolume: $('btnVolume'), volPanel: $('volPanel'), optVolume: $('optVolume'), volVal: $('volVal'),
+    btnTestSound: $('btnTestSound'), btnMuteToggle: $('btnMuteToggle'),
+    lensBar: $('lensBar'), lensButtons: $('lensButtons'), zoomRow: $('zoomRow'),
+    optCamZoom: $('optCamZoom'), camZoomVal: $('camZoomVal'),
   };
 
   // ---------- Settings ----------
-  const DEFAULTS = { voice: true, beep: true, repeat: false, zoom: true, sens: 6, debug: false, muted: false };
+  const DEFAULTS = {
+    voice: true, beep: true, repeat: false, zoom: true, sens: 6, debug: false,
+    muted: false, volume: 80,          // alert volume, 0–100
+    lens: 'wide', camZoom: 1,          // rear lens ('ultra' | 'wide' | 'tele') and its zoom factor
+  };
   const settings = loadSettings();
 
   function loadSettings() {
@@ -56,11 +64,23 @@
     const showSens = () => { els.sensVal.textContent = `${settings.sens}/10`; };
     showSens();
     els.optSens.addEventListener('input', () => { settings.sens = +els.optSens.value; showSens(); saveSettings(); });
-    updateMuteButton();
+
+    els.optVolume.value = settings.volume;
+    els.optVolume.addEventListener('input', () => {
+      settings.volume = +els.optVolume.value;
+      if (settings.volume > 0) settings.muted = false;
+      saveSettings(); applyVolume(); updateVolumeUI();
+    });
+    els.optVolume.addEventListener('change', () => playAlertSound('green'));  // preview on release
+    updateVolumeUI();
   }
-  function updateMuteButton() {
-    els.btnMute.textContent = settings.muted ? '🔇' : '🔊';
-    els.btnMute.setAttribute('aria-label', settings.muted ? 'Unmute announcements' : 'Mute announcements');
+  function updateVolumeUI() {
+    const silent = settings.muted || settings.volume === 0;
+    els.btnVolume.textContent = silent ? '🔇' : settings.volume < 40 ? '🔈' : settings.volume < 75 ? '🔉' : '🔊';
+    els.volVal.textContent = `${settings.volume}%`;
+    els.btnMuteToggle.textContent = settings.muted ? 'Unmute' : 'Mute';
+    els.btnMuteToggle.classList.toggle('on', settings.muted);
+    els.btnVolume.setAttribute('aria-label', silent ? 'Alert volume (muted)' : `Alert volume ${settings.volume}%`);
   }
 
   // ---------- Model ----------
@@ -228,17 +248,38 @@
   }
 
   // ---------- Announcements ----------
-  let audioCtx = null;
+  // All alert audio runs through one Web Audio gain node so the volume slider controls both the
+  // beeps and the voice. The voice is pre-recorded (audio/*.wav) because iOS ignores the volume
+  // of speechSynthesis; speechSynthesis is only a fallback if the clips cannot be loaded.
+  let audioCtx = null, master = null;
+  const voiceData = {}, voiceBuffers = {};
+  const voiceLoaded = Promise.all(['red', 'yellow', 'green'].map((c) =>
+    fetch(`audio/${c}.wav`).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => { voiceData[c] = b; }).catch(() => {})));
+
+  /** Slider position (0–100) → linear gain, on a curve that sounds even across the range. */
+  const volumeGain = () => (settings.muted ? 0 : (settings.volume / 100) ** 2);
+
+  function applyVolume() {
+    if (!master) return;
+    master.gain.cancelScheduledValues(0);
+    master.gain.value = volumeGain();
+  }
 
   function unlockAudio() {
     // iOS: route web audio as media playback so it is audible even with the silent switch on.
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
     try {
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        master = audioCtx.createGain();
+        master.gain.value = volumeGain();
+        master.connect(audioCtx.destination);
+      }
       if (audioCtx.state === 'suspended') audioCtx.resume();
       const o = audioCtx.createOscillator(), g = audioCtx.createGain();
       g.gain.value = 0.0001; o.connect(g).connect(audioCtx.destination);
       o.start(); o.stop(audioCtx.currentTime + 0.02);
+      voiceLoaded.then(decodeVoices);
     } catch { /* no web audio */ }
     try {
       if ('speechSynthesis' in window) {
@@ -249,32 +290,61 @@
     } catch { /* no speech */ }
   }
 
-  function beep(color) {
-    if (!audioCtx) return;
+  function decodeVoices() {
+    for (const [c, data] of Object.entries(voiceData)) {
+      if (!data || voiceBuffers[c]) continue;
+      // slice(): decodeAudioData detaches the buffer it is given
+      audioCtx.decodeAudioData(data.slice(0), (buf) => { voiceBuffers[c] = buf; }, () => {});
+    }
+  }
+
+  /** Schedules the beep pattern at audio time t0; returns its duration in seconds. */
+  function beep(color, t0) {
     const patterns = {
-      red: [[392, 0, 0.18], [392, 0.26, 0.18]],                    // two low tones
+      red: [[392, 0, 0.18], [392, 0.26, 0.18]],                       // two low tones
       yellow: [[587, 0, 0.12], [587, 0.18, 0.12], [587, 0.36, 0.12]], // three medium tones
-      green: [[659, 0, 0.12], [880, 0.14, 0.22]],                    // rising chime
+      green: [[659, 0, 0.12], [880, 0.14, 0.22]],                     // rising chime
     };
-    const t0 = audioCtx.currentTime + 0.01;
+    let end = 0;
     for (const [freq, at, dur] of patterns[color]) {
       const o = audioCtx.createOscillator(), g = audioCtx.createGain();
       o.type = color === 'red' ? 'square' : 'sine';
       o.frequency.value = freq;
       g.gain.setValueAtTime(0, t0 + at);
-      g.gain.linearRampToValueAtTime(color === 'red' ? 0.18 : 0.35, t0 + at + 0.01);
+      g.gain.linearRampToValueAtTime(color === 'red' ? 0.3 : 0.6, t0 + at + 0.01);
       g.gain.exponentialRampToValueAtTime(0.001, t0 + at + dur);
-      o.connect(g).connect(audioCtx.destination);
+      o.connect(g).connect(master);
       o.start(t0 + at); o.stop(t0 + at + dur + 0.02);
+      end = Math.max(end, at + dur);
     }
+    return end;
   }
 
-  function speak(text) {
+  function speak(color, t0) {
+    const buf = voiceBuffers[color];
+    if (buf) {
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(master);
+      src.start(t0);
+      return;
+    }
     if (!('speechSynthesis' in window)) return;
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.05; u.volume = 1;
-    speechSynthesis.speak(u);
+    const delayMs = Math.max(0, (t0 - audioCtx.currentTime) * 1000);
+    setTimeout(() => {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(SPOKEN[color]);
+      u.rate = 1.05; u.volume = Math.min(1, volumeGain());
+      speechSynthesis.speak(u);
+    }, delayMs);
+  }
+
+  function playAlertSound(color) {
+    if (!audioCtx || volumeGain() === 0) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    let t = audioCtx.currentTime + 0.02;
+    if (settings.beep) t += beep(color, t) + 0.12;
+    if (settings.voice) speak(color, t);
   }
 
   function announce(color) {
@@ -283,9 +353,7 @@
     els.bannerText.textContent = color.toUpperCase();
     void els.banner.offsetWidth;            // restart pulse animation
     els.banner.classList.add('pulse');
-    if (settings.muted) return;
-    if (settings.beep) beep(color);
-    if (settings.voice) setTimeout(() => speak(SPOKEN[color]), settings.beep ? 450 : 0);
+    playAlertSound(color);
   }
 
   function clearAnnouncement() {
@@ -441,17 +509,112 @@
   }
   const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
-  async function startCamera() {
+  // ---------- Camera & lenses ----------
+  // iOS lists every rear lens as its own camera ("Back Camera", "Back Telephoto Camera",
+  // "Back Ultra Wide Camera"); labels become readable once camera permission is granted.
+  const LENS_LABEL = { ultra: '0.5×', wide: '1×', tele: 'Tele' };
+  const LENS_NAME = { ultra: 'Ultra wide', wide: 'Wide', tele: 'Telephoto' };
+  let lenses = {};            // kind → deviceId, rear lenses only
+  let activeLens = null;
+
+  function lensKind(label) {
+    const l = label.toLowerCase();
+    if (/front|facetime|avant|vorder|frontal|anterior/.test(l)) return 'front';
+    if (/ultra/.test(l)) return 'ultra';
+    if (/tele/.test(l)) return 'tele';
+    if (/dual|triple|double|doble|dreifach|tripla/.test(l)) return 'virtual';   // multi-lens virtual cameras
+    return 'wide';
+  }
+
+  async function findLenses() {
+    const found = {};
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    for (const d of devices) {
+      if (d.kind !== 'videoinput' || !d.label) continue;
+      const k = lensKind(d.label);
+      if (k !== 'front' && k !== 'virtual' && !found[k]) found[k] = d.deviceId;
+    }
+    return found;
+  }
+
+  function openStream(deviceId) {
+    const video = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
+    if (deviceId) video.deviceId = { exact: deviceId };
+    else video.facingMode = { ideal: 'environment' };
+    return navigator.mediaDevices.getUserMedia({ audio: false, video });
+  }
+
+  async function startCamera(kind = settings.lens) {
     stopSource();
     sourceKind = 'camera';
     els.photo.hidden = true; els.video.hidden = false;
     els.stage.classList.remove('contain');
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
-    });
+
+    if (!Object.keys(lenses).length) lenses = await findLenses().catch(() => ({}));
+    const id = lenses[kind] || null;
+    try {
+      stream = await openStream(id);
+    } catch (err) {
+      if (!id) throw err;
+      stream = await openStream(null);          // lens unavailable → default rear camera
+    }
+    if (!Object.keys(lenses).length) {
+      // First run: permission was just granted, so the lens list is readable now.
+      lenses = await findLenses().catch(() => ({}));
+      const opened = lensKind(stream.getVideoTracks()[0].label);
+      if (lenses[kind] && opened !== kind) {
+        stream.getTracks().forEach((t) => t.stop());
+        stream = await openStream(lenses[kind]);
+      }
+    }
+    activeLens = lensKind(stream.getVideoTracks()[0].label);
     els.video.srcObject = stream;
     await els.video.play();
+    renderLensBar();
+  }
+
+  async function switchLens(kind) {
+    if (sourceKind !== 'camera' || kind === activeLens) return;
+    settings.lens = kind; settings.camZoom = 1; saveSettings();
+    history.length = 0;
+    try { await startCamera(kind); } catch (err) { els.status.textContent = cameraErrorText(err); }
+  }
+
+  function renderLensBar() {
+    const kinds = ['ultra', 'wide', 'tele'].filter((k) => lenses[k]);
+    els.lensButtons.textContent = '';
+    for (const k of kinds) {
+      const b = document.createElement('button');
+      b.textContent = LENS_LABEL[k];
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-label', `${LENS_NAME[k]} lens`);
+      b.setAttribute('aria-checked', String(k === activeLens));
+      b.addEventListener('click', () => switchLens(k));
+      els.lensButtons.appendChild(b);
+    }
+    els.lensButtons.hidden = kinds.length < 2;
+    setupZoom();
+    els.lensBar.hidden = els.lensButtons.hidden && els.zoomRow.hidden;
+  }
+
+  /** Shows a zoom slider when the browser exposes the camera's zoom (iOS 17+ Safari). */
+  function setupZoom() {
+    const track = stream && stream.getVideoTracks()[0];
+    const z = track && track.getCapabilities ? track.getCapabilities().zoom : null;
+    if (!z || !(z.max > z.min)) { els.zoomRow.hidden = true; return; }
+    const max = Math.min(z.max, 10);            // beyond ~10× digital zoom the image is too soft to help
+    els.optCamZoom.min = z.min;
+    els.optCamZoom.max = max;
+    els.optCamZoom.step = z.step > 0 ? Math.max(z.step, 0.1) : 0.1;
+    els.optCamZoom.value = Math.min(max, Math.max(z.min, settings.camZoom));
+    applyZoom(+els.optCamZoom.value);
+    els.zoomRow.hidden = false;
+  }
+
+  function applyZoom(v) {
+    els.camZoomVal.textContent = `${v.toFixed(1)}×`;
+    const track = stream && stream.getVideoTracks()[0];
+    if (track) track.applyConstraints({ advanced: [{ zoom: v }] }).catch(() => {});
   }
 
   function stopSource() {
@@ -463,6 +626,7 @@
 
   async function startFile(file) {
     stopSource();
+    els.lensBar.hidden = true;
     const url = URL.createObjectURL(file);
     if (file.type.startsWith('image/')) {
       sourceKind = 'image';
@@ -538,12 +702,33 @@
     clearAnnouncement();
     octx.clearRect(0, 0, els.overlay.width, els.overlay.height);
     els.status.textContent = '';
+    els.lensBar.hidden = true;
+    showVolumePanel(false);
     els.start.hidden = false;
   });
-  els.btnMute.addEventListener('click', () => {
-    settings.muted = !settings.muted; saveSettings(); updateMuteButton();
+
+  function showVolumePanel(show) {
+    els.volPanel.hidden = !show;
+    els.btnVolume.setAttribute('aria-expanded', String(show));
+  }
+  els.btnVolume.addEventListener('click', () => { unlockAudio(); showVolumePanel(els.volPanel.hidden); });
+  document.addEventListener('pointerdown', (e) => {
+    if (!els.volPanel.hidden && !els.volPanel.contains(e.target) && !els.btnVolume.contains(e.target)) showVolumePanel(false);
+  });
+  els.btnMuteToggle.addEventListener('click', () => {
+    settings.muted = !settings.muted;
+    if (!settings.muted && settings.volume === 0) { settings.volume = 50; els.optVolume.value = 50; }
+    saveSettings(); applyVolume(); updateVolumeUI();
     if (settings.muted && 'speechSynthesis' in window) speechSynthesis.cancel();
-    else unlockAudio();
+  });
+  let testColor = 0;
+  els.btnTestSound.addEventListener('click', () => {
+    unlockAudio();
+    playAlertSound(['red', 'yellow', 'green'][testColor++ % 3]);
+  });
+  els.optCamZoom.addEventListener('input', () => {
+    settings.camZoom = +els.optCamZoom.value; saveSettings();
+    applyZoom(settings.camZoom);
   });
 
   document.addEventListener('visibilitychange', async () => {
@@ -571,6 +756,7 @@
       for (const d of dets) Object.assign(d, classifyColor(el, vw, vh, d));
       return { dets, vote: frameVote(dets) };
     },
+    audioState: () => ({ gain: master && master.gain.value, voices: Object.keys(voiceBuffers), ctx: audioCtx && audioCtx.state }),
   };
 
   // ---------- Offline support ----------

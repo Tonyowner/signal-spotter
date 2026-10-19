@@ -1,6 +1,6 @@
 // Service worker: caches the whole app (including the ~18 MB model) on first visit
 // so it works fully offline afterwards.
-const VERSION = 'v1';
+const VERSION = '1.1';
 const SHELL_CACHE = `signal-shell-${VERSION}`;
 const ASSET_CACHE = 'signal-assets-v1';   // model + tfjs; rarely change, keep across shell updates
 
@@ -13,6 +13,9 @@ const SHELL = [
   'icons/icon-180.png',
   'icons/icon-192.png',
   'icons/icon-512.png',
+  'audio/red.wav',
+  'audio/yellow.wav',
+  'audio/green.wav',
 ];
 const ASSETS = [
   'vendor/tf.min.js',

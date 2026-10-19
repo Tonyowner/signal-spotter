@@ -98,6 +98,51 @@ html, body {
 #banner.pulse { animation: pulse 0.5s ease; }
 @keyframes pulse { 0% { transform: scale(1); } 40% { transform: scale(1.05); } 100% { transform: scale(1); } }
 
+/* Volume panel */
+#volPanel {
+  position: fixed; z-index: 6;
+  top: calc(var(--safe-top) + 62px); right: 16px;
+  width: min(340px, calc(100vw - 32px));
+  padding: 16px; border-radius: 20px;
+  background: var(--panel);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+}
+#volPanel[hidden] { display: none; }
+.vol-row { display: flex; align-items: center; gap: 10px; font-size: 18px; }
+.vol-row input { flex: 1; min-width: 0; accent-color: #0a84ff; height: 32px; }
+#volVal { width: 3.2em; text-align: right; font-size: 16px; font-variant-numeric: tabular-nums; }
+.vol-actions { display: flex; gap: 10px; margin-top: 12px; }
+.vol-actions button { font-size: 16px; padding: 13px 10px; }
+#btnMuteToggle.on { background: var(--red); }
+.vol-hint { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+
+/* Lens switcher */
+#lensBar {
+  position: fixed; z-index: 5; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--safe-bottom) + 20px + 92px + 14px);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+#lensBar[hidden] { display: none; }
+#lensButtons {
+  display: flex; gap: 6px; padding: 5px; border-radius: 26px;
+  background: rgba(28, 28, 30, 0.7);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+#lensButtons button {
+  min-width: 52px; height: 42px; padding: 0 12px; border: 0; border-radius: 21px;
+  background: rgba(60, 60, 64, 0.8); color: #fff;
+  font: 600 15px/1 -apple-system, system-ui, sans-serif;
+}
+#lensButtons button[aria-checked="true"] { background: rgba(0,0,0,0.85); color: var(--yellow); }
+#zoomRow {
+  display: flex; align-items: center; gap: 10px; width: 240px;
+  padding: 4px 14px; border-radius: 20px; background: rgba(28, 28, 30, 0.7);
+}
+#zoomRow[hidden] { display: none; }
+#zoomRow input { flex: 1; accent-color: var(--yellow); height: 30px; }
+#camZoomVal { font-size: 14px; width: 3em; text-align: right; color: var(--yellow); font-variant-numeric: tabular-nums; }
+
 /* Sheets */
 .sheet {
   position: fixed; inset: 0; z-index: 10;
@@ -122,6 +167,7 @@ html, body {
 
 h1 { font-size: 30px; margin: 18px 0 8px; }
 h2 { font-size: 24px; margin: 0 0 16px; }
+h2 .version { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 6px; }
 .lead { color: #d1d1d6; font-size: 17px; line-height: 1.4; margin: 0 0 22px; }
 .fine { color: var(--muted); font-size: 13px; line-height: 1.45; margin-top: 22px; }
 
@@ -156,4 +202,5 @@ button.secondary, .file-btn { background: #2c2c2e; color: #fff; }
   #banner { left: auto; right: 16px; width: 320px; min-height: 72px; }
   #banner.red #bannerText, #banner.yellow #bannerText, #banner.green #bannerText { font-size: 30px; }
   #bannerLamp { width: 44px; height: 44px; }
+  #lensBar { left: 16px; transform: none; bottom: calc(var(--safe-bottom) + 20px); align-items: flex-start; }
 }
