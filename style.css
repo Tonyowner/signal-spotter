@@ -55,11 +55,26 @@ html, body {
   background: linear-gradient(rgba(0,0,0,0.65), rgba(0,0,0,0));
   z-index: 5;
 }
+.top-left { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 #status {
   font: 500 13px/1.3 ui-monospace, "SF Mono", Menlo, monospace;
   color: #e5e5ea; text-shadow: 0 1px 2px #000;
   white-space: pre-line;
 }
+#status:empty { display: none; }
+
+/* Lane switch */
+#laneBar {
+  display: flex; gap: 4px; padding: 4px; border-radius: 24px; align-self: flex-start;
+  background: rgba(40, 40, 44, 0.75);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+#laneBar button {
+  height: 38px; padding: 0 14px; border: 0; border-radius: 19px;
+  background: transparent; color: #e5e5ea;
+  font: 600 15px/1 -apple-system, system-ui, sans-serif; white-space: nowrap;
+}
+#laneBar button[aria-checked="true"] { background: #f5f5f7; color: #000; }
 .top-actions { display: flex; gap: 10px; }
 .icon-btn {
   width: 44px; height: 44px; border-radius: 22px; border: 0;
@@ -67,10 +82,18 @@ html, body {
   backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
 }
 
+/* Bottom area: lens/zoom bar above the announcement banner */
+#bottom {
+  position: fixed; left: 16px; right: 16px; z-index: 5;
+  bottom: calc(var(--safe-bottom) + 20px);
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  pointer-events: none;
+}
+#bottom > * { pointer-events: auto; }
+
 /* Announcement banner */
 #banner {
-  position: fixed; left: 16px; right: 16px;
-  bottom: calc(var(--safe-bottom) + 20px);
+  align-self: stretch;
   min-height: 92px;
   border-radius: 24px;
   display: flex; align-items: center; gap: 18px;
@@ -84,7 +107,21 @@ html, body {
   flex: none; width: 56px; height: 56px; border-radius: 50%;
   background: #3a3a3c; border: 3px solid rgba(255,255,255,0.25);
 }
+.banner-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 #bannerText { font-size: 22px; font-weight: 600; line-height: 1.2; }
+#bannerRole { font-size: 14px; font-weight: 700; letter-spacing: 0.08em; opacity: 0.85; }
+#bannerRole:empty { display: none; }
+#bannerSub {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 12px 5px 8px; border-radius: 14px;
+  background: rgba(0, 0, 0, 0.72); color: #fff;
+  font-size: 16px; font-weight: 600;
+}
+#bannerSub[hidden] { display: none; }
+#bannerSub::before { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--unknown); }
+#bannerSub.red::before { background: var(--red); }
+#bannerSub.yellow::before { background: var(--yellow); }
+#bannerSub.green::before { background: var(--green); }
 
 #banner.red    { background: var(--red); }
 #banner.yellow { background: var(--yellow); color: #1c1c1e; }
@@ -97,6 +134,9 @@ html, body {
   box-shadow: 0 0 24px 6px rgba(255,255,255,0.8);
 }
 #banner.pulse { animation: pulse 0.5s ease; }
+#banner.flash #bannerLamp { animation: blink 1s steps(2, jump-none) infinite; }
+@keyframes blink { 50% { opacity: 0.15; } }
+#banner.flash #bannerText { font-size: 30px; }
 @keyframes pulse { 0% { transform: scale(1); } 40% { transform: scale(1.05); } 100% { transform: scale(1); } }
 
 /* Volume panel */
@@ -119,11 +159,7 @@ html, body {
 .vol-hint { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
 
 /* Lens switcher */
-#lensBar {
-  position: fixed; z-index: 5; left: 50%; transform: translateX(-50%);
-  bottom: calc(var(--safe-bottom) + 20px + 92px + 14px);
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-}
+#lensBar { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 #lensBar[hidden] { display: none; }
 #lensButtons {
   display: flex; gap: 6px; padding: 5px; border-radius: 26px;
@@ -207,8 +243,9 @@ button.secondary, .file-btn { background: #2c2c2e; color: #fff; }
 .settings-actions button { font-size: 16px; }
 
 @media (orientation: landscape) and (max-height: 500px) {
-  #banner { left: auto; right: 16px; width: 320px; min-height: 72px; }
+  #bottom { flex-direction: row; align-items: flex-end; justify-content: space-between; }
+  #banner { align-self: auto; width: 340px; min-height: 72px; }
   #banner.red #bannerText, #banner.yellow #bannerText, #banner.green #bannerText { font-size: 30px; }
   #bannerLamp { width: 44px; height: 44px; }
-  #lensBar { left: 16px; transform: none; bottom: calc(var(--safe-bottom) + 20px); align-items: flex-start; }
+  #lensBar { align-items: flex-start; }
 }

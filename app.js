@@ -4,11 +4,12 @@
  *   1. SSDLite MobileNet v2 (COCO, TensorFlow.js) finds "traffic light" boxes.
  *      Optionally a second, zoomed pass over the upper-center of the view
  *      catches distant lights that are too small at full-frame resolution.
- *   2. Each box is cropped from the full-resolution frame and its lit lamp is
- *      classified red / yellow / green from HSV color, with the lamp's position
- *      in the housing (top/middle/bottom) as a tie-breaker.
- *   3. A short temporal vote stabilises the result before it is announced
- *      visually, by voice (speechSynthesis) and by beep tones (Web Audio).
+ *   2. Each box is cropped from the full-resolution frame and logic.js finds its lit
+ *      lamp (a round, emissive spot, not housing paint) and reads its color, checked
+ *      against the lamp's position in the head.
+ *   3. Each signal head is tracked over time (smoothing, flashing, US sequence rules),
+ *      the heads are split into the through-lane signal and the left-turn signal, and
+ *      the signal for the chosen lane is announced on screen, by voice and with tones.
  */
 (() => {
   'use strict';
@@ -17,7 +18,6 @@
   const TRAFFIC_LIGHT_COL = 9;          // COCO id 10 → score column 9
   const MODEL_INPUT = 300;
   const COLORS = { red: '#ff3b30', yellow: '#ffcc00', green: '#30d158', unknown: '#a1a1a6' };
-  const SPOKEN = { red: 'Red light', yellow: 'Yellow light', green: 'Green light' };
   const LOST_AFTER_MS = 1500;           // forget the light after this long without a sighting
   const BOX_HOLD_MS = 350;              // keep drawing a box briefly to avoid flicker
 
@@ -35,13 +35,16 @@
     btnTestSound: $('btnTestSound'), btnMuteToggle: $('btnMuteToggle'),
     lensBar: $('lensBar'), lensButtons: $('lensButtons'), zoomRow: $('zoomRow'),
     optCamZoom: $('optCamZoom'), camZoomVal: $('camZoomVal'), diag: $('diag'),
+    laneBar: $('laneBar'), bannerRole: $('bannerRole'), bannerSub: $('bannerSub'),
   };
+  const { PHRASES, baseColor } = SignalLogic;
 
   // ---------- Settings ----------
   const DEFAULTS = {
     voice: true, beep: true, repeat: false, zoom: true, sens: 6, debug: false,
     muted: false, volume: 80,          // alert volume, 0–100
     lens: 'wide', camZoom: 1,          // rear lens ('ultra' | 'wide' | 'tele') and its zoom factor
+    lane: 'straight',                  // 'straight' | 'left' (US: turn-only lane on the left)
   };
   const settings = loadSettings();
 
@@ -71,7 +74,7 @@
       if (settings.volume > 0) settings.muted = false;
       saveSettings(); updateVolumeUI();
     });
-    els.optVolume.addEventListener('change', () => playAlertSound('green'));  // preview on release
+    els.optVolume.addEventListener('change', () => playAlert({ color: 'green', primaryKey: 'main-green' }));  // preview
     updateVolumeUI();
   }
   function updateVolumeUI() {
@@ -153,10 +156,15 @@
     const inter = ix * iy;
     return inter / (a.w * a.h + b.w * b.h - inter);
   }
+  function contained(a, b) {
+    const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+    const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+    return (ix * iy) / Math.min(a.w * a.h, b.w * b.h);
+  }
   function nms(dets, thr = 0.45) {
     dets.sort((a, b) => b.score - a.score);
     const keep = [];
-    for (const d of dets) if (keep.every((k) => iou(k, d) < thr)) keep.push(d);
+    for (const d of dets) if (keep.every((k) => iou(k, d) < thr && contained(k, d) < 0.7)) keep.push(d);
     return keep.slice(0, 10);
   }
 
@@ -167,84 +175,20 @@
     return { sx: cx - side / 2, sy: Math.max(0, cy - side / 2), sw: side, sh: side };
   }
 
-  // ---------- Color classification ----------
+  // ---------- Lamp classification ----------
   const clsCanvas = document.createElement('canvas');
   const clsCtx = clsCanvas.getContext('2d', { willReadFrequently: true });
 
-  function hueClass(h) {
-    if (h < 22 || h >= 320) return 'red';
-    if (h < 70) return 'yellow';
-    if (h >= 70 && h <= 205) return 'green';
-    return null;
-  }
-
-  /** Classifies the lit lamp inside box d of the source. Returns {color, conf}. */
-  function classifyColor(src, vw, vh, d) {
+  /** Crops box d of the source (long side 96 px) and finds its lit lamp (see logic.js). */
+  function classifyHead(src, vw, vh, d) {
     const x = Math.max(0, Math.floor(d.x)), y = Math.max(0, Math.floor(d.y));
     const w = Math.min(vw - x, Math.ceil(d.w)), h = Math.min(vh - y, Math.ceil(d.h));
-    if (w < 2 || h < 2) return { color: 'unknown', conf: 0 };
-    const scale = 64 / Math.max(w, h);
+    if (w < 3 || h < 3) return { lit: false, color: 'unknown', conf: 0 };
+    const scale = 96 / Math.max(w, h);
     const cw = Math.max(4, Math.round(w * scale)), ch = Math.max(4, Math.round(h * scale));
     clsCanvas.width = cw; clsCanvas.height = ch;
     clsCtx.drawImage(src, x, y, w, h, 0, 0, cw, ch);
-    const px = clsCtx.getImageData(0, 0, cw, ch).data;
-
-    let vmax = 0;
-    for (let i = 0; i < px.length; i += 4) {
-      const v = Math.max(px[i], px[i + 1], px[i + 2]);
-      if (v > vmax) vmax = v;
-    }
-    if (vmax < 110) return { color: 'unknown', conf: 0 };   // nothing lit
-
-    const bright = Math.max(110, vmax * 0.62);
-    const halo = bright * 0.7;
-    const score = { red: 0, yellow: 0, green: 0 };
-    let cx = 0, cy = 0, cwSum = 0;
-
-    for (let py = 0; py < ch; py++) {
-      for (let pxi = 0; pxi < cw; pxi++) {
-        const i = (py * cw + pxi) * 4;
-        const r = px[i], g = px[i + 1], b = px[i + 2];
-        const max = Math.max(r, g, b);
-        if (max < halo) continue;
-        const min = Math.min(r, g, b);
-        const s = (max - min) / max;
-        // Lamps sit inside the housing; pixels at the box edge are mostly background (sky, foliage).
-        const edge = pxi < cw * 0.1 || pxi >= cw * 0.9 || py < ch * 0.06 || py >= ch * 0.94;
-        const wPos = (max >= bright ? 1 : 0.4) * (edge ? 0.25 : 1);
-        cx += pxi * wPos; cy += py * wPos; cwSum += wPos;  // lamp centroid (incl. washed-out cores)
-        if (s < 0.22) continue;
-        let hue;
-        const dlt = max - min;
-        if (max === r) hue = 60 * (((g - b) / dlt) % 6);
-        else if (max === g) hue = 60 * ((b - r) / dlt + 2);
-        else hue = 60 * ((r - g) / dlt + 4);
-        if (hue < 0) hue += 360;
-        const cls = hueClass(hue);
-        if (cls) score[cls] += s * (max / 255) * wPos;
-      }
-    }
-
-    const total = score.red + score.yellow + score.green;
-    const pixels = cw * ch;
-
-    // Position prior: vertical housing → top=red, middle=yellow, bottom=green;
-    // horizontal housing → left=red, right=green.
-    let prior = null;
-    if (cwSum > 0) {
-      const ny = cy / cwSum / ch, nx = cx / cwSum / cw;
-      const pos = h > w * 1.35 ? ny : w > h * 1.35 ? nx : null;
-      if (pos !== null) prior = pos < 0.4 ? 'red' : pos > 0.6 ? 'green' : 'yellow';
-    }
-
-    // No colored glow → lamp off, or the back/side of a signal head seen against the sky.
-    if (total < pixels * 0.004) return { color: 'unknown', conf: 0 };
-    if (prior) score[prior] += total * 0.25;
-
-    let best = 'red';
-    for (const k of ['yellow', 'green']) if (score[k] > score[best]) best = k;
-    const sum = score.red + score.yellow + score.green;
-    return { color: best, conf: score[best] / sum };
+    return SignalLogic.classifyLamp(clsCtx.getImageData(0, 0, cw, ch).data, cw, ch);
   }
 
   // ---------- Announcements ----------
@@ -257,10 +201,10 @@
   alertAudio.preload = 'auto';
   let alertUrl = null;
   let audioStatus = 'not started';
-  const voicePcm = {};                      // color → Float32Array at SR
-  ['red', 'yellow', 'green'].forEach((c) => {
-    fetch(`audio/${c}.wav`).then((r) => (r.ok ? r.arrayBuffer() : null))
-      .then((b) => { if (b) voicePcm[c] = parseWav(b); }).catch(() => {});
+  const voicePcm = {};                      // phrase key (see PHRASES) → Float32Array at SR
+  Object.keys(PHRASES).forEach((k) => {
+    fetch(`audio/${k}.wav`).then((r) => (r.ok ? r.arrayBuffer() : null))
+      .then((b) => { if (b) voicePcm[k] = parseWav(b); }).catch(() => {});
   });
 
   /** Slider position (0–100) → linear gain, on a curve that sounds even across the range. */
@@ -307,28 +251,36 @@
     green: [[659, 0, 0.12], [880, 0.14, 0.22]],                     // rising chime
   };
 
-  /** Renders tones and/or voice for a color at the given gain; returns PCM or null. */
-  function renderAlert(color, gain) {
+  /**
+   * Renders one alert at the given gain: tones for the primary color, its phrase, then the
+   * secondary phrase a little quieter (e.g. "Green light ... Left turn, red"). Returns PCM or null.
+   * alert: {color, primaryKey, secondaryKey}; color/primaryKey are null for a mention only.
+   */
+  function renderAlert(alert, gain, withVoice) {
     const lead = 0.08;                       // iOS can clip the very start of a clip
-    const beepLen = settings.beep ? Math.max(...BEEPS[color].map(([, at, dur]) => at + dur)) + 0.12 : 0;
-    const voice = settings.voice ? voicePcm[color] : null;
-    if (!settings.beep && !voice) return null;
-    const total = Math.ceil((lead + beepLen + 0.05) * SR) + (voice ? voice.length : 0);
-    const pcm = new Float32Array(total);
-    if (settings.beep) {
-      for (const [freq, at, dur] of BEEPS[color]) {
+    const tones = settings.beep && alert.color ? BEEPS[alert.color] : null;
+    const beepLen = tones ? Math.max(...tones.map(([, at, dur]) => at + dur)) + 0.12 : 0;
+    const v1 = withVoice && settings.voice && alert.primaryKey ? voicePcm[alert.primaryKey] : null;
+    const v2 = withVoice && settings.voice && alert.secondaryKey ? voicePcm[alert.secondaryKey] : null;
+    if (!tones && !v1 && !v2) return null;
+    const start1 = Math.round((lead + beepLen) * SR);
+    const start2 = start1 + (v1 ? v1.length + Math.round(0.25 * SR) : 0);
+    const pcm = new Float32Array(start2 + (v2 ? v2.length : 0) + Math.round(0.05 * SR));
+    if (tones) {
+      for (const [freq, at, dur] of tones) {
         const start = Math.round((lead + at) * SR), n = Math.round(dur * SR);
-        const peak = color === 'red' ? 0.35 : 0.6;
+        const peak = alert.color === 'red' ? 0.35 : 0.6;
         for (let i = 0; i < n; i++) {
           const t = i / SR;
           const env = t < 0.01 ? t / 0.01 : Math.exp(-6.9 * (t - 0.01) / (dur - 0.01));  // 10 ms attack, decay to −60 dB
           const ph = 2 * Math.PI * freq * t;
-          const wave = color === 'red' ? (Math.sin(ph) >= 0 ? 1 : -1) : Math.sin(ph);
+          const wave = alert.color === 'red' ? (Math.sin(ph) >= 0 ? 1 : -1) : Math.sin(ph);
           pcm[start + i] += wave * env * peak;
         }
       }
     }
-    if (voice) pcm.set(voice, Math.round((lead + beepLen) * SR));
+    if (v1) pcm.set(v1, start1);
+    if (v2) for (let i = 0; i < v2.length; i++) pcm[start2 + i] += v2[i] * 0.75;
     for (let i = 0; i < pcm.length; i++) pcm[i] *= gain;
     return pcm;
   }
@@ -354,81 +306,96 @@
     } catch { /* no speech */ }
   }
 
-  function speakFallback(color) {
+  function speakFallback(alert) {
     if (!settings.voice || !('speechSynthesis' in window)) return;
+    const text = [alert.primaryKey, alert.secondaryKey].filter(Boolean).map((k) => PHRASES[k]).join('. ');
+    if (!text) return;
     speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(SPOKEN[color]);
+    const u = new SpeechSynthesisUtterance(text);
     u.rate = 1.05;
     speechSynthesis.speak(u);
   }
 
-  function playAlertSound(color) {
+  const alertLog = [];                      // recent alerts, for diagnostics
+  let pendingAlert = null;
+  alertAudio.addEventListener('ended', () => {
+    const next = pendingAlert;
+    pendingAlert = null;
+    if (next) playAlertNow(next);
+  });
+  function playAlert(alert) {
+    alertLog.push([alert.primaryKey, alert.secondaryKey].filter(Boolean).join(' + '));
+    if (alertLog.length > 12) alertLog.shift();
+    if (!alertAudio.paused && !alert.primaryKey) { pendingAlert = alert; return; }   // let the current clip finish
+    pendingAlert = null;
+    playAlertNow(alert);
+  }
+  function playAlertNow(alert) {
     const gain = volumeGain();
     if (gain === 0) return;
-    const pcm = renderAlert(color, gain);
-    if (!pcm) { speakFallback(color); return; }   // voice clip not loaded yet
+    // Voice clips not loaded (yet)? Speak with the built-in voice and play only the tones.
+    const clipsReady = [alert.primaryKey, alert.secondaryKey].every((k) => !k || voicePcm[k]);
+    if (settings.voice && !clipsReady) speakFallback(alert);
+    const pcm = renderAlert(alert, gain, clipsReady);
+    if (!pcm) return;
     playPcm(pcm)
       .then(() => { audioStatus = 'ready (media playback)'; })
       .catch((err) => {
         if (err.name === 'AbortError') return;          // replaced by a newer alert
         audioStatus = `blocked: ${err.name} (using speech fallback)`;
-        speakFallback(color);
+        speakFallback(alert);
       });
-  }
-
-  function announce(color) {
-    els.banner.className = color;
-    els.edge.className = color;
-    els.bannerText.textContent = color.toUpperCase();
-    void els.banner.offsetWidth;            // restart pulse animation
-    els.banner.classList.add('pulse');
-    playAlertSound(color);
   }
 
   function clearAnnouncement() {
     els.banner.className = 'none';
     els.edge.className = '';
+    els.bannerRole.textContent = '';
     els.bannerText.textContent = 'Searching for traffic lights…';
+    els.bannerSub.hidden = true;
   }
 
-  // ---------- Temporal smoothing ----------
-  const history = [];          // recent per-frame colors (null = no light)
-  let announced = null, announcedAt = 0, lastSeen = 0;
+  // ---------- Signal heads, lanes & announcements ----------
+  const tracker = new SignalLogic.HeadTracker();
+  const STATE_LABEL = { red: 'RED', yellow: 'YELLOW', green: 'GREEN', 'flash-yellow': 'FLASHING YELLOW', 'flash-red': 'FLASHING RED' };
+  const ROLE_CAPTION = { turn: 'LEFT TURN', straight: 'STRAIGHT' };
+  const announcer = new SignalLogic.Announcer();
 
-  function frameVote(dets) {
-    const w = { red: 0, yellow: 0, green: 0 };
-    for (const d of dets) {
-      if (d.color === 'unknown' || d.conf < 0.45) continue;
-      w[d.color] += d.score * d.conf * Math.sqrt(d.w * d.h);
-    }
-    let best = null, bestW = 0;
-    for (const k in w) if (w[k] > bestW) { best = k; bestW = w[k]; }
-    return best;
+  function resetSignals() {
+    tracker.reset();
+    announcer.reset();
+    clearAnnouncement();
   }
 
-  function updateState(color, now) {
-    history.push(color);
-    if (history.length > 5) history.shift();
-    if (color) lastSeen = now;
-
-    const count = (c) => history.filter((h) => h === c).length;
-    if (color && count(color) >= 3) {
-      if (color !== announced) {
-        announced = color; announcedAt = now;
-        announce(color);
-      } else if (settings.repeat && now - announcedAt > 5000) {
-        announcedAt = now;
-        announce(color);
-      }
-    } else if (announced && now - lastSeen > LOST_AFTER_MS) {
-      announced = null;
-      clearAnnouncement();
+  function showBanner(r, pulse) {
+    const base = baseColor(r.primary);
+    els.banner.className = base + (r.primary.startsWith('flash') ? ' flash' : '');
+    els.edge.className = base;
+    els.bannerRole.textContent = ROLE_CAPTION[r.primaryRole] || '';
+    els.bannerText.textContent = STATE_LABEL[r.primary];
+    if (r.secondary) {
+      els.bannerSub.hidden = false;
+      els.bannerSub.className = baseColor(r.secondary);
+      const who = r.secondaryRole === 'turn' ? 'Left turn' : 'Straight';
+      els.bannerSub.textContent = `${who}: ${STATE_LABEL[r.secondary].toLowerCase()}`;
+    } else {
+      els.bannerSub.hidden = true;
     }
+    if (pulse) {
+      els.banner.classList.remove('pulse');
+      void els.banner.offsetWidth;          // restart pulse animation
+      els.banner.classList.add('pulse');
+    }
+  }
+
+  function setLane(lane) {
+    settings.lane = lane; saveSettings();
+    els.laneBar.querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.lane === lane)));
+    announcer.reset();                       // re-announce for the new lane
   }
 
   // ---------- Drawing ----------
   const octx = els.overlay.getContext('2d');
-  let shownDets = [], shownAt = 0;
 
   function sizeOverlay() {
     const dpr = window.devicePixelRatio || 1;
@@ -455,7 +422,7 @@
     ctx.closePath();
   }
 
-  function draw(vw, vh, fit, tile, z) {
+  function draw(vw, vh, fit, tile, z, tracks, roleMap, now) {
     const W = window.innerWidth, H = window.innerHeight;
     octx.clearRect(0, 0, W, H);
     const m = screenMap(vw, vh, fit, z);
@@ -465,29 +432,41 @@
       octx.strokeRect(m.dx + tile.sx * m.s, m.dy + tile.sy * m.s, tile.sw * m.s, tile.sh * m.s);
       octx.setLineDash([]);
     }
-    if (performance.now() - shownAt > BOX_HOLD_MS) return;
 
-    for (const d of shownDets) {
-      const pad = 6;
+    for (const t of tracks) {
+      if (now - t.lastSeen > BOX_HOLD_MS) continue;
+      const d = t.box, pad = 6;
       const x = m.dx + d.x * m.s - pad, y = m.dy + d.y * m.s - pad;
       const w = d.w * m.s + pad * 2, h = d.h * m.s + pad * 2;
-      const col = COLORS[d.color];
+      const base = baseColor(t.state) || 'unknown';
+      const role = roleMap.get(t.id);
+      const col = COLORS[base];
       octx.save();
-      octx.shadowColor = col; octx.shadowBlur = 18;
-      octx.lineWidth = 4; octx.strokeStyle = col;
+      if (role === 'other') octx.setLineDash([8, 6]);       // not part of the main / turn signals
+      octx.shadowColor = col; octx.shadowBlur = t.state ? 18 : 0;
+      octx.lineWidth = t.state ? 4 : 2; octx.strokeStyle = col;
       roundRect(octx, x, y, w, h, 10); octx.stroke();
       octx.restore();
-      octx.fillStyle = col + '22';
-      roundRect(octx, x, y, w, h, 10); octx.fill();
+      if (t.state) { octx.fillStyle = col + '22'; roundRect(octx, x, y, w, h, 10); octx.fill(); }
 
-      const label = d.color === 'unknown' ? 'LIGHT' : d.color.toUpperCase();
-      const text = settings.debug ? `${label} ${Math.round(d.score * 100)}% · ${Math.round(d.conf * 100)}%` : label;
+      let text = t.state ? STATE_LABEL[t.state] : 'LIGHT';
+      if (role === 'turn') text = `TURN · ${text}`;
+      if (settings.debug && t.lamp) {
+        const L = t.lamp;
+        text += ` ${Math.round(t.score * 100)}% ${L.lit ? `${L.color[0]}${Math.round(L.conf * 100)} c${L.contrast.toFixed(1)}` : 'off'}`;
+        if (L.lamp) {                                     // where the lamp was found
+          octx.strokeStyle = '#fff'; octx.lineWidth = 1.5;
+          octx.beginPath();
+          octx.arc(m.dx + (d.x + L.lamp.x * d.w) * m.s, m.dy + (d.y + L.lamp.y * d.h) * m.s, Math.max(3, L.lamp.r * Math.min(d.w, d.h) * m.s), 0, 2 * Math.PI);
+          octx.stroke();
+        }
+      }
       octx.font = '700 15px -apple-system, system-ui, sans-serif';
       const tw = octx.measureText(text).width + 16;
       const ly = y - 28 < 4 ? y + h + 4 : y - 28;
       octx.fillStyle = col;
       roundRect(octx, x, ly, tw, 24, 8); octx.fill();
-      octx.fillStyle = d.color === 'yellow' || d.color === 'green' ? '#111' : '#fff';
+      octx.fillStyle = base === 'red' ? '#fff' : '#111';
       octx.fillText(text, x + 8, ly + 17);
     }
   }
@@ -524,19 +503,23 @@
         dets = dets.concat(await detectRegion(src.el, tile.sx, tile.sy, tile.sw, tile.sh, thresh));
       }
       dets = nms(dets);
-      for (const d of dets) Object.assign(d, classifyColor(src.el, src.vw, src.vh, d));
+      for (const d of dets) d.lamp = classifyHead(src.el, src.vw, src.vh, d);
       const t1 = performance.now();
 
-      if (dets.length) { shownDets = dets; shownAt = t1; }
-      updateState(frameVote(dets), t1);
-      draw(src.vw, src.vh, src.fit, tile, z);
+      const tracks = tracker.update(dets, t1);
+      const r = SignalLogic.assignRoles(tracks, t1, settings.lane, src.vw);
+      const out = announcer.update(r, t1, settings.repeat ? 5000 : 0);
+      if (out.banner === null) clearAnnouncement();
+      else if (out.banner) showBanner(out.banner, out.pulse);
+      if (out.alert) playAlert(out.alert);
+      draw(src.vw, src.vh, src.fit, tile, z, tracks, r.roles, t1);
 
       const dt = t1 - last; last = t1;
       fpsAvg = fpsAvg ? fpsAvg * 0.9 + (1000 / dt) * 0.1 : 1000 / dt;
       inferAvg = inferAvg ? inferAvg * 0.9 + (t1 - t0) * 0.1 : t1 - t0;
       els.status.textContent = settings.debug
-        ? `${fpsAvg.toFixed(1)} fps · ${inferAvg.toFixed(0)} ms · ${tf.getBackend()}\n${src.vw}×${src.vh} · thr ${thresh.toFixed(2)} · zoom ${z.toFixed(1)}× · ${dets.length} box`
-        : (dets.length ? `${dets.length} light${dets.length > 1 ? 's' : ''} in view` : 'Scanning…');
+        ? `${fpsAvg.toFixed(1)} fps · ${inferAvg.toFixed(0)} ms · ${tf.getBackend()}\n${src.vw}×${src.vh} · thr ${thresh.toFixed(2)} · zoom ${z.toFixed(1)}× · ${dets.length} box\nmain ${r.main || '–'} · turn ${r.turn || '–'}`
+        : (dets.length ? '' : 'Scanning…');
 
       await nextFrame();
     }
@@ -548,7 +531,7 @@
   // expose a single "Back Camera". Tele therefore uses the telephoto lens when it is listed and
   // otherwise zooms the main camera — with hardware zoom if the browser offers it, else a digital
   // crop. The crop is also what the detector sees, so distant lights become larger for it too.
-  const TELE_ZOOM = 3, DIGITAL_MAX = 5, HW_MAX = 10;
+  const TELE_ZOOM = 2, DIGITAL_MAX = 5, HW_MAX = 10;
   const LENS_NAME = { ultra: 'Ultra wide', wide: 'Wide', tele: 'Telephoto' };
   let lenses = {};            // kind → deviceId, rear lenses only
   let cameraList = [];        // all video inputs, for diagnostics
@@ -625,7 +608,7 @@
     settings.lens = mode;
     settings.camZoom = mode === 'tele' && !lenses.tele ? TELE_ZOOM : 1;
     saveSettings();
-    history.length = 0;
+    tracker.reset();
     const target = deviceFor(mode);
     if (lenses[target] && target !== activeLens) {
       try { await startCamera(mode); } catch (err) { els.status.textContent = cameraErrorText(err); }
@@ -689,11 +672,12 @@
     const track = stream && stream.getVideoTracks()[0];
     const s = track && track.getSettings ? track.getSettings() : {};
     return [
-      `Version 1.2 · ${tf.getBackend ? tf.getBackend() : '?'}`,
+      `Version 1.3 · lane ${settings.lane} · ${tf.getBackend ? tf.getBackend() : '?'}`,
       `Cameras: ${cameraList.length ? cameraList.join(', ') : 'none listed yet'}`,
       `Rear lenses found: ${Object.keys(lenses).join(', ') || 'none'}`,
       `Active: ${track ? track.label || '(no label)' : 'no camera'}${s.width ? ` · ${s.width}×${s.height}` : ''}`,
       `Zoom: ${hwZoom ? `hardware ${hwZoom.min}–${hwZoom.max}×` : `digital (max ${DIGITAL_MAX}×)`} · now ${settings.camZoom}×`,
+      `Recent alerts: ${alertLog.slice(-4).join(' | ') || 'none'}`,
       `Audio: ${audioStatus} · voice clips ${Object.keys(voicePcm).length}/3`,
       `Volume ${settings.volume}%${settings.muted ? ' (muted)' : ''}`,
       navigator.userAgent.replace(/^Mozilla\/5\.0 /, ''),
@@ -711,6 +695,7 @@
 
   async function startFile(file) {
     stopSource();
+    tracker.reset();
     els.lensBar.hidden = true;
     const url = URL.createObjectURL(file);
     if (file.type.startsWith('image/')) {
@@ -749,7 +734,7 @@
     }
     els.start.hidden = true;
     els.btnStart.disabled = false;
-    history.length = 0; announced = null; clearAnnouncement();
+    resetSignals();
     requestWakeLock();
     if (!model) {
       els.status.textContent = 'Loading model…';
@@ -811,10 +796,19 @@
     saveSettings(); updateVolumeUI();
     if (settings.muted && 'speechSynthesis' in window) speechSynthesis.cancel();
   });
-  let testColor = 0;
-  els.btnTestSound.addEventListener('click', () => {
-    playAlertSound(['red', 'yellow', 'green'][testColor++ % 3]);
+  // Test sound cycles through examples, including a left-turn mention.
+  const TESTS = [
+    { color: 'red', primaryKey: 'main-red' },
+    { color: 'yellow', primaryKey: 'main-yellow' },
+    { color: 'green', primaryKey: 'main-green', secondaryKey: 'turn-red' },
+  ];
+  let testIdx = 0;
+  els.btnTestSound.addEventListener('click', () => playAlert(TESTS[testIdx++ % TESTS.length]));
+  els.laneBar.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-lane]');
+    if (b) setLane(b.dataset.lane);
   });
+  setLane(settings.lane);
   els.optCamZoom.addEventListener('input', () => {
     settings.camZoom = +els.optCamZoom.value; saveSettings();
     applyZoom(settings.camZoom);
@@ -840,17 +834,21 @@
 
   // Debug hook (used for testing on still images from the console).
   window.SignalSpotter = {
-    async analyze(el, { zoom = settings.zoom } = {}) {
+    async analyze(el, { zoom = settings.zoom, digital = 1 } = {}) {
       await modelReady;
       const vw = el.naturalWidth || el.videoWidth || el.width, vh = el.naturalHeight || el.videoHeight || el.height;
-      let dets = await detectRegion(el, 0, 0, vw, vh, minScore());
-      if (zoom) { const t = zoomTile(vw, vh); dets = dets.concat(await detectRegion(el, t.sx, t.sy, t.sw, t.sh, minScore())); }
+      const cw = vw / digital, ch = vh / digital, cx = (vw - cw) / 2, cy = (vh - ch) / 2;   // same crop as Tele
+      let dets = await detectRegion(el, cx, cy, cw, ch, minScore());
+      if (zoom) { const t = zoomTile(cw, ch); dets = dets.concat(await detectRegion(el, cx + t.sx, cy + t.sy, t.sw, t.sh, minScore())); }
       dets = nms(dets);
-      for (const d of dets) Object.assign(d, classifyColor(el, vw, vh, d));
-      return { dets, vote: frameVote(dets) };
+      for (const d of dets) d.lamp = classifyHead(el, vw, vh, d);
+      return { dets };
     },
     audioState: () => ({ status: audioStatus, voices: Object.keys(voicePcm), src: alertAudio.src.slice(0, 30), paused: alertAudio.paused }),
     diagnostics: () => diagnostics(),
+    alerts: () => alertLog.slice(),
+    tracks: () => tracker.tracks.map((t) => ({ id: t.id, x: Math.round(t.box.x), state: t.state, cand: t.cand, role: t.role || null,
+      obs: t.obs.slice(-8).map((o) => o.kind[0] + (o.kind === 'on' || o.kind === 'weak' ? o.color[0] : '')).join('') })),
   };
 
   // ---------- Offline support ----------

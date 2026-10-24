@@ -8,7 +8,7 @@ const path = require('path');
 
 const VOICE = process.argv[2] || 'Microsoft Zira Desktop';
 const RATE = 24000;
-const PHRASES = { red: 'Red light', yellow: 'Yellow light', green: 'Green light' };
+const { PHRASES } = require('../logic.js');   // single source of the spoken alerts
 const outDir = path.join(__dirname, '..', 'audio');
 fs.mkdirSync(outDir, { recursive: true });
 

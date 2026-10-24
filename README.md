@@ -13,20 +13,24 @@ connection.
 | Step | What happens |
 |---|---|
 | Detect | **SSDLite MobileNet v2** (COCO-trained, TensorFlow.js on the phone's GPU through WebGL) scores every frame for the *traffic light* class. A second pass zooms 2× into the upper-centre of the view to catch distant lights (Long-range mode). |
-| Classify | Each box is cropped from the full-resolution frame. Bright, saturated pixels are scored by hue (red / amber / green). The lamp's position in the housing (top / middle / bottom, or left / right) breaks ties. |
-| Stabilise | A light must have the same color in 3 of the last 5 frames before it is announced. A change is announced at once, and the banner clears 1.5 s after the light leaves view. |
-| Announce | Full-color banner, glowing screen edge and an outlined box. A voice clip says "Red light", "Yellow light" or "Green light". Tones: red = two low beeps, yellow = three medium, green = rising chime. All audio goes through one volume control. |
+| Find the lamp | In each box, [logic.js](logic.js) looks for the *lit lamp*: a round spot that glows (much brighter than the ring around it), or a round red / yellow / green patch that is **not** surrounded by the same color. Painted housings (US yellow), reflective backplate borders, signs and sky fail these tests, so they are never read as a light. |
+| Read the color | Color is read only inside the lamp. Hue bands match signal LEDs (US green is blue-green), and yellow-green glows are treated as uncertain rather than forced into yellow or green. In a whole 3-lamp head the color must agree with the lamp's position (top red, middle yellow, bottom green), or the head stays unknown. |
+| Track each head | Every signal head is followed across frames with its own smoothed state. A color must persist (≈0.3–0.4 s) before it counts. Changes that break the US sequence (green → yellow → red → green), such as red → yellow, must persist 1.5 s. Flashing is recognized only as a regular ≈1-per-second on/off rhythm (so a distant light blinking in and out of view is not "flashing"), including the **flashing yellow arrow** in the bottom lamp of US left-turn heads. |
+| Lanes | US layout: the through lanes' heads usually agree; a **turn-only lane's head is to their left**. The app groups the heads into *main* (through) and *turn*. A head must differ from the others for 1.5 s to count as the turn signal (heads of one signal change a moment apart). Once identified it stays the turn signal, so it is never announced as your light when the through heads are briefly unreadable. |
+| Announce | Your lane's signal must hold for 0.4 s, then it is announced whenever it changes: full-color banner, glowing screen edge, outlined boxes (**TURN** label on the turn head), tones and voice. The other lane's signal is mentioned briefly ("Left turn red" / "Straight green") only when it is new. |
 
 ## Files
 
 ```
 index.html, style.css, app.js     the app
+logic.js                           lamp finding, head tracking, lane roles (no DOM; unit-tested)
 sw.js, manifest.webmanifest        offline cache + "Add to Home Screen" support
 vendor/tf.min.js                   TensorFlow.js 4.22.0 (bundled, no CDN)
 models/ssdlite_mobilenet_v2/       detector weights (~18 MB, bundled)
 icons/                             app icons (regenerate: node tools/make-icons.js)
 audio/                             spoken alerts (regenerate on Windows: node tools/make-voice.js)
 tools/serve.js                     local test server
+tools/test-logic.js                unit tests for logic.js: node tools/test-logic.js
 ```
 
 ## Put it on your iPhone
@@ -50,8 +54,14 @@ host. The model never leaves your phone; the host only delivers the files.
 4. From now on it works in Airplane Mode.
 
 Tips:
-- Hold the phone upright with the light in the upper half of the screen. That area gets the extra
+- **Lane switch (top left):** **Straight** (default) announces the through-lane signal and briefly
+  mentions the left-turn signal. **◀ Left turn** announces the turn signal and briefly mentions
+  the straight signal. If no separate turn signal is visible, the main signal is announced.
+- Hold the phone upright with the lights in the upper half of the screen. That area gets the extra
   long-range scan.
+- **Use Tele when the signals are far away.** At 1× a signal 100 m away is only a few pixels tall;
+  Tele (2× by default) makes it readable while keeping the left-turn head in view. Switch back to
+  1× when you are close to the intersection, or the signals leave the zoomed view.
 - **Lenses & zoom:** buttons above the banner switch between **1×** and **Tele**, plus **0.5×**
   when iOS exposes the ultra-wide lens. Tele uses the telephoto lens if iOS lists it. Otherwise it
   zooms the main camera 3× (digitally, unless the browser offers hardware zoom). The detector then
