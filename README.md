@@ -67,10 +67,14 @@ Tips:
   zooms the main camera 3× (digitally, unless the browser offers hardware zoom). The detector then
   sees the zoomed view, so distant lights get easier to find. The slider sets any zoom from 1× to
   5×. The app remembers your choice.
-- **Volume:** tap 🔊 to open the volume panel. It has a slider, **Test sound** and **Mute**. The
-  slider controls both the tones and the voice. The phone's volume buttons set the overall level
-  as usual (alerts use the *media* volume).
-- Alerts play as a media clip, so they are audible even with the ring/silent switch on.
+- **Volume & sound type:** tap 🔊 to open the volume panel: slider, **Test sound**, **Mute** and
+  **Sound type**. Which kind of web sound an iPhone plays aloud while the camera runs differs between
+  phones, iOS versions, the Silent switch and Bluetooth/CarPlay, so there are three:
+  **iPhone voice** (default, the phone's own voice), **Recorded** (recorded voice played as media)
+  and **Web audio**. Tapping one plays a test; keep the one you hear. With iPhone voice some phones
+  ignore the slider for the voice; then the phone's volume buttons set it.
+- No sound at all? Turn off Silent mode (switch or Action button), and if the phone is connected
+  to the car by Bluetooth/CarPlay, the sound goes to the car: set the car's audio source to it.
 - **Settings › Diagnostics** shows which cameras iOS reports and the audio status. This helps if
   something doesn't work.
 - The screen stays awake while the app runs.

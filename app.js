@@ -34,7 +34,7 @@
     btnVolume: $('btnVolume'), volPanel: $('volPanel'), optVolume: $('optVolume'), volVal: $('volVal'),
     btnTestSound: $('btnTestSound'), btnMuteToggle: $('btnMuteToggle'),
     lensBar: $('lensBar'), lensButtons: $('lensButtons'), zoomRow: $('zoomRow'),
-    optCamZoom: $('optCamZoom'), camZoomVal: $('camZoomVal'), diag: $('diag'),
+    optCamZoom: $('optCamZoom'), camZoomVal: $('camZoomVal'), diag: $('diag'), soundTypes: $('soundTypes'),
     laneBar: $('laneBar'), bannerRole: $('bannerRole'), bannerSub: $('bannerSub'),
   };
   const { PHRASES, baseColor } = SignalLogic;
@@ -45,6 +45,7 @@
     muted: false, volume: 80,          // alert volume, 0–100
     lens: 'wide', camZoom: 1,          // rear lens ('ultra' | 'wide' | 'tele') and its zoom factor
     lane: 'straight',                  // 'straight' | 'left' (US: turn-only lane on the left)
+    sound: 'speech',                   // 'speech' | 'clip' | 'webaudio' (see Sound below)
   };
   const settings = loadSettings();
 
@@ -191,16 +192,21 @@
     return SignalLogic.classifyLamp(clsCtx.getImageData(0, 0, cw, ch).data, cw, ch);
   }
 
-  // ---------- Announcements ----------
-  // iOS mutes Web Audio when the ring/silent switch is on, and ignores the volume of both
-  // speechSynthesis and <audio>. So each alert (tones + recorded voice) is rendered here at the
-  // chosen volume into a small WAV and played through one <audio> element, which iOS treats as
-  // media playback (audible with the silent switch on). The element is unlocked by the Start tap.
+  // ---------- Sound ----------
+  // Which kind of web sound is audible differs between iPhones, iOS versions, the Silent switch
+  // and Bluetooth/CarPlay routing, especially while the camera is running. So there are three
+  // sound types, chosen in the volume panel (choosing one plays a test):
+  //   speech   – the iPhone's built-in voice (speechSynthesis) with tones through Web Audio. This
+  //              is how version 1.0 sounded, the setup confirmed audible on the user's iPhone.
+  //   clip     – tones + recorded voice rendered at the chosen volume into a WAV, played as media.
+  //   webaudio – the same rendered alert played through Web Audio.
+  // All of them are unlocked by the Start tap: iOS only allows sound after a tap.
   const SR = 24000;
+  const SOUND_TYPES = { speech: 'iPhone voice', clip: 'Recorded voice', webaudio: 'Web audio' };
   const alertAudio = new Audio();
   alertAudio.preload = 'auto';
-  let alertUrl = null;
-  let audioStatus = 'not started';
+  let alertUrl = null, audioCtx = null, webSrc = null, unlocked = false;
+  const soundStatus = { speech: 'not used yet', clip: 'not used yet', webaudio: 'not used yet' };
   const voicePcm = {};                      // phrase key (see PHRASES) → Float32Array at SR
   Object.keys(PHRASES).forEach((k) => {
     fetch(`audio/${k}.wav`).then((r) => (r.ok ? r.arrayBuffer() : null))
@@ -253,7 +259,7 @@
 
   /**
    * Renders one alert at the given gain: tones for the primary color, its phrase, then the
-   * secondary phrase a little quieter (e.g. "Green light ... Left turn, red"). Returns PCM or null.
+   * secondary phrase a little quieter (e.g. "Green light ... Left turn red"). Returns PCM or null.
    * alert: {color, primaryKey, secondaryKey}; color/primaryKey are null for a mention only.
    */
   function renderAlert(alert, gain, withVoice) {
@@ -285,20 +291,81 @@
     return pcm;
   }
 
-  function playPcm(pcm) {
+  /** Ask iOS to treat this page's sound as media playback (Safari 16.4+), as version 1.0 did. */
+  function setPlaybackSession() {
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
+  }
+
+  function ensureAudioContext() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
+      return audioCtx;
+    } catch { return null; }
+  }
+
+  // English voice of the phone (the phone's language may be another one).
+  let enVoice = null;
+  function pickVoice() {
+    const vs = speechSynthesis.getVoices().filter((v) => /^en[-_]US/i.test(v.lang));
+    enVoice = vs.find((v) => v.localService && /samantha|ava|allison|susan|zoe|nicky/i.test(v.name)) ||
+      vs.find((v) => v.localService) || vs[0] || null;
+  }
+  if ('speechSynthesis' in window) {
+    pickVoice();
+    speechSynthesis.onvoiceschanged = pickVoice;
+  }
+
+  function speak(text, volume) {
+    if (!('speechSynthesis' in window)) { soundStatus.speech = 'not supported'; return; }
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'en-US';
+    if (enVoice) u.voice = enVoice;
+    u.volume = volume;                       // some iPhones ignore this: then the volume buttons set it
+    u.onstart = () => { soundStatus.speech = `spoke (${enVoice ? enVoice.name : 'default voice'})`; };
+    u.onerror = (e) => { soundStatus.speech = `error: ${e.error || 'unknown'}`; };
+    speechSynthesis.speak(u);
+    if (speechSynthesis.paused) speechSynthesis.resume();
+  }
+
+  function playClip(pcm, silent) {
     if (alertUrl) URL.revokeObjectURL(alertUrl);
     alertUrl = URL.createObjectURL(encodeWav(pcm));
     alertAudio.src = alertUrl;
-    return alertAudio.play();
+    const p = alertAudio.play();
+    p.then(() => { if (!silent) soundStatus.clip = 'played'; })
+      .catch((err) => { if (err.name !== 'AbortError') soundStatus.clip = `blocked: ${err.name}`; });
+    return p;
   }
 
-  /** Must run inside a tap: plays a short silent clip so later alerts may play without a tap. */
+  function playWebAudio(pcm) {
+    const ctx = ensureAudioContext();
+    if (!ctx) { soundStatus.webaudio = 'not supported'; return; }
+    const buf = ctx.createBuffer(1, pcm.length, SR);
+    buf.getChannelData(0).set(pcm);
+    if (webSrc) try { webSrc.stop(); } catch { /* already ended */ }
+    webSrc = ctx.createBufferSource();
+    webSrc.buffer = buf;
+    webSrc.connect(ctx.destination);
+    webSrc.start();
+    soundStatus.webaudio = `played (audio ${ctx.state})`;
+  }
+
+  /** Must run inside a tap: unlocks every sound path so later alerts may play without a tap. */
   function unlockAudio() {
-    playPcm(new Float32Array(Math.round(SR * 0.05)))
-      .then(() => { audioStatus = 'ready (media playback)'; })
-      .catch((err) => { if (err.name !== 'AbortError') audioStatus = `blocked: ${err.name}`; });
+    unlocked = true;
+    setPlaybackSession();
+    playClip(new Float32Array(Math.round(SR * 0.05)), true);       // silent clip
+    const ctx = ensureAudioContext();
+    if (ctx) {
+      const s = ctx.createBufferSource();
+      s.buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+      s.connect(ctx.destination);
+      s.start();
+    }
     try {
-      if ('speechSynthesis' in window) {     // fallback path, unlocked too
+      if ('speechSynthesis' in window) {
         const u = new SpeechSynthesisUtterance(' ');
         u.volume = 0;
         speechSynthesis.speak(u);
@@ -306,45 +373,42 @@
     } catch { /* no speech */ }
   }
 
-  function speakFallback(alert) {
-    if (!settings.voice || !('speechSynthesis' in window)) return;
-    const text = [alert.primaryKey, alert.secondaryKey].filter(Boolean).map((k) => PHRASES[k]).join('. ');
-    if (!text) return;
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.05;
-    speechSynthesis.speak(u);
-  }
-
   const alertLog = [];                      // recent alerts, for diagnostics
-  let pendingAlert = null;
-  alertAudio.addEventListener('ended', () => {
-    const next = pendingAlert;
-    pendingAlert = null;
-    if (next) playAlertNow(next);
-  });
+  let busyUntil = 0, pendingTimer = null;
   function playAlert(alert) {
     alertLog.push([alert.primaryKey, alert.secondaryKey].filter(Boolean).join(' + '));
     if (alertLog.length > 12) alertLog.shift();
-    if (!alertAudio.paused && !alert.primaryKey) { pendingAlert = alert; return; }   // let the current clip finish
-    pendingAlert = null;
+    clearTimeout(pendingTimer);
+    pendingTimer = null;
+    const wait = busyUntil - performance.now();
+    if (!alert.primaryKey && wait > 0) {     // a mention waits for the current alert to finish
+      pendingTimer = setTimeout(() => { pendingTimer = null; playAlertNow(alert); }, wait + 150);
+      return;
+    }
     playAlertNow(alert);
   }
-  function playAlertNow(alert) {
+
+  function playAlertNow(alert, type = settings.sound) {
     const gain = volumeGain();
     if (gain === 0) return;
-    // Voice clips not loaded (yet)? Speak with the built-in voice and play only the tones.
-    const clipsReady = [alert.primaryKey, alert.secondaryKey].every((k) => !k || voicePcm[k]);
-    if (settings.voice && !clipsReady) speakFallback(alert);
-    const pcm = renderAlert(alert, gain, clipsReady);
-    if (!pcm) return;
-    playPcm(pcm)
-      .then(() => { audioStatus = 'ready (media playback)'; })
-      .catch((err) => {
-        if (err.name === 'AbortError') return;          // replaced by a newer alert
-        audioStatus = `blocked: ${err.name} (using speech fallback)`;
-        speakFallback(alert);
-      });
+    const keys = [alert.primaryKey, alert.secondaryKey].filter(Boolean);
+    const clipsReady = keys.every((k) => voicePcm[k]);
+    let ms;
+    if (type === 'speech' || !clipsReady) {
+      // Tones first, then the phone's own voice (also the fallback while clips are loading).
+      const tones = renderAlert({ color: alert.color }, gain, false);
+      if (tones) { if (type === 'clip') playClip(tones); else playWebAudio(tones); }
+      const toneMs = tones ? (tones.length / SR) * 1000 : 0;
+      const text = keys.map((k) => PHRASES[k]).join('. ');
+      if (settings.voice && text) setTimeout(() => speak(text, Math.min(1, settings.volume / 100)), toneMs);
+      ms = toneMs + (settings.voice ? text.length * 75 : 0);
+    } else {
+      const pcm = renderAlert(alert, gain, true);
+      if (!pcm) return;
+      if (type === 'clip') playClip(pcm); else playWebAudio(pcm);
+      ms = (pcm.length / SR) * 1000;
+    }
+    busyUntil = performance.now() + ms;
   }
 
   function clearAnnouncement() {
@@ -672,13 +736,15 @@
     const track = stream && stream.getVideoTracks()[0];
     const s = track && track.getSettings ? track.getSettings() : {};
     return [
-      `Version 1.3 · lane ${settings.lane} · ${tf.getBackend ? tf.getBackend() : '?'}`,
+      `Version 1.4 · lane ${settings.lane} · ${tf.getBackend ? tf.getBackend() : '?'}`,
       `Cameras: ${cameraList.length ? cameraList.join(', ') : 'none listed yet'}`,
       `Rear lenses found: ${Object.keys(lenses).join(', ') || 'none'}`,
       `Active: ${track ? track.label || '(no label)' : 'no camera'}${s.width ? ` · ${s.width}×${s.height}` : ''}`,
       `Zoom: ${hwZoom ? `hardware ${hwZoom.min}–${hwZoom.max}×` : `digital (max ${DIGITAL_MAX}×)`} · now ${settings.camZoom}×`,
       `Recent alerts: ${alertLog.slice(-4).join(' | ') || 'none'}`,
-      `Audio: ${audioStatus} · voice clips ${Object.keys(voicePcm).length}/3`,
+      `Sound type: ${SOUND_TYPES[settings.sound]} · audio session ${navigator.audioSession ? navigator.audioSession.type : 'n/a'}`,
+      `iPhone voice: ${soundStatus.speech} · recorded: ${soundStatus.clip} · web audio: ${soundStatus.webaudio}`,
+      `Voice clips ${Object.keys(voicePcm).length}/${Object.keys(PHRASES).length}`,
       `Volume ${settings.volume}%${settings.muted ? ' (muted)' : ''}`,
       navigator.userAgent.replace(/^Mozilla\/5\.0 /, ''),
     ].join('\n');
@@ -786,7 +852,7 @@
   }
   els.btnVolume.addEventListener('click', () => { unlockAudio(); showVolumePanel(els.volPanel.hidden); });
   // Any tap re-enables alert audio if iOS has not allowed it yet.
-  document.addEventListener('touchend', () => { if (!audioStatus.startsWith('ready')) unlockAudio(); });
+  document.addEventListener('touchend', () => { if (!unlocked) unlockAudio(); });
   document.addEventListener('pointerdown', (e) => {
     if (!els.volPanel.hidden && !els.volPanel.contains(e.target) && !els.btnVolume.contains(e.target)) showVolumePanel(false);
   });
@@ -803,7 +869,25 @@
     { color: 'green', primaryKey: 'main-green', secondaryKey: 'turn-red' },
   ];
   let testIdx = 0;
-  els.btnTestSound.addEventListener('click', () => playAlert(TESTS[testIdx++ % TESTS.length]));
+  // Taps: re-assert the playback session and resume audio, then play right away.
+  function testSound(type) {
+    setPlaybackSession();
+    ensureAudioContext();
+    playAlertNow(TESTS[testIdx++ % TESTS.length], type);
+  }
+  els.btnTestSound.addEventListener('click', () => testSound(settings.sound));
+  function updateSoundTypeUI() {
+    els.soundTypes.querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.sound === settings.sound)));
+  }
+  els.soundTypes.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-sound]');
+    if (!b) return;
+    settings.sound = b.dataset.sound; saveSettings();
+    updateSoundTypeUI();
+    testIdx = 2;                             // "Green light. Left turn red"
+    testSound(settings.sound);
+  });
+  updateSoundTypeUI();
   els.laneBar.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-lane]');
     if (b) setLane(b.dataset.lane);
@@ -822,6 +906,7 @@
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState !== 'visible' || !running) return;
     requestWakeLock();
+    if (audioCtx && audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
     if (sourceKind === 'camera') {
       const track = stream && stream.getVideoTracks()[0];
       if (!track || track.readyState === 'ended') {
@@ -844,7 +929,7 @@
       for (const d of dets) d.lamp = classifyHead(el, vw, vh, d);
       return { dets };
     },
-    audioState: () => ({ status: audioStatus, voices: Object.keys(voicePcm), src: alertAudio.src.slice(0, 30), paused: alertAudio.paused }),
+    audioState: () => ({ type: settings.sound, ...soundStatus, clips: Object.keys(voicePcm).length, ctx: audioCtx && audioCtx.state }),
     diagnostics: () => diagnostics(),
     alerts: () => alertLog.slice(),
     tracks: () => tracker.tracks.map((t) => ({ id: t.id, x: Math.round(t.box.x), state: t.state, cand: t.cand, role: t.role || null,

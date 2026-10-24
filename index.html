@@ -49,7 +49,15 @@
       <button id="btnTestSound" class="secondary">Test sound</button>
       <button id="btnMuteToggle" class="secondary">Mute</button>
     </div>
-    <p class="vol-hint">The phone's volume buttons also set the overall level.</p>
+    <div class="sound-type">
+      <span>Sound type</span>
+      <div id="soundTypes" role="radiogroup" aria-label="Sound type">
+        <button data-sound="speech" role="radio">iPhone voice</button>
+        <button data-sound="clip" role="radio">Recorded</button>
+        <button data-sound="webaudio" role="radio">Web audio</button>
+      </div>
+    </div>
+    <p class="vol-hint">No sound? Turn off Silent mode and check Bluetooth / CarPlay, then tap each sound type and keep the one you hear. The phone's volume buttons also set the level.</p>
   </div>
 
   <div id="bottom">
@@ -86,14 +94,14 @@
       </label>
       <p class="fine">Runs entirely on your phone — no internet needed after the first visit.<br>
         Assistive aid only. Always rely on your own judgment and traffic rules.<br>
-        Version 1.3</p>
+        Version 1.4</p>
     </div>
   </section>
 
   <!-- Settings -->
   <section id="settings" class="sheet" hidden>
     <div class="settings-inner">
-      <h2>Settings <small class="version">v1.3</small></h2>
+      <h2>Settings <small class="version">v1.4</small></h2>
       <label class="row"><span>Speak color</span><input type="checkbox" id="optVoice"></label>
       <label class="row"><span>Beep tones</span><input type="checkbox" id="optBeep"></label>
       <label class="row"><span>Repeat announcement every 5 s</span><input type="checkbox" id="optRepeat"></label>
